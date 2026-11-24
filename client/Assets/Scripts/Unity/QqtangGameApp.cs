@@ -69,6 +69,7 @@ namespace Qqtang.UnityClient
         private readonly List<LegacyUdpMulticastTarget> _battlePeers = new List<LegacyUdpMulticastTarget>();
         private readonly List<(ushort playerId, LocalBattleAiBot bot)> _offlineBots = new List<(ushort, LocalBattleAiBot)>();
         private bool _isOfflineSolo;
+        private bool _adventureDoorwaySent;
         private ushort _activeBattleMapId = 201;
         private float _simAccumulatorMs;
         private float _helloTimer;
@@ -391,7 +392,15 @@ namespace Qqtang.UnityClient
                 PlayBattleAudioCues(_sim.StepAudioCues);
 
                 bombQueued = false;
-                if (!_isOfflineSolo) FlushOutgoingBattleEvents();
+                if (!_isOfflineSolo)
+                {
+                    FlushOutgoingBattleEvents();
+                    if (_store.GameType == RoomGameType.Adventure && _sim.AdventureDoorwayTriggered && !_adventureDoorwaySent)
+                    {
+                        _adventureDoorwaySent = true;
+                        RequestAdventureNextMap();
+                    }
+                }
 
                 if (_isOfflineSolo && _sim.IsFinished && _sim.OfflineSettlement != null)
                 {
@@ -468,6 +477,7 @@ namespace Qqtang.UnityClient
         private void StartBattle(GameBeginData begin)
         {
             _isOfflineSolo = false;
+            _adventureDoorwaySent = false;
             _offlineBots.Clear();
             _activeBattleMapId = (ushort)begin.MapId;
             _battlePeers.Clear();

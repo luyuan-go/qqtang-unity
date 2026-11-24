@@ -945,7 +945,7 @@ namespace Qqtang.Core.Tests
                 Assert(div.Result == 0, $"Divorce failed: {div.Result}");
                 Pass("Live Marriage (Info, Spark, Answer, LoveWord, Divorce)");
 
-                // 14. Live Solo Adventure Multi-Stage Clear (1601 -> CreatePVENPCBoss 0x138A -> Kill all NPCs via ReportDeathId -> NextMap 0x1178 -> Stage 2 1602!) & Clean Logout
+                // 14. Live Solo Adventure Multi-Stage Clear (CreatePVENPCBoss 0x138A -> open-cell spawn -> TCP pickup 0x0FAF -> Doorway auto-trigger -> NextMap 0x1178 -> Stage 2!)
                 await c1.SetItemStatusAsync(SpecialItemIds.SinglePlayerAdventureCard, 1);
                 ushort advRoomId = await c1.CreateRoomAsync("AdvSoloRoom", RoomPropertyFlag.Standard, RoomGameType.Adventure);
                 var advEnter = await c1.EnterRoomAsync(advRoomId, roleId: 1);
@@ -955,18 +955,34 @@ namespace Qqtang.Core.Tests
                 var advBegin = await WaitForCommandAsync(c1, GameCommands.GameBeginNotify, p => GameBeginData.ParseLengthPrefixed(p.Payload));
                 Assert(advBegin.GameId > 0 && advBegin.Players.Count == 1, "Adventure GameBegin mismatch");
 
-                // Receive CreatePveNpcBoss (0x138A), feed into Rule1BattleSimulation, clear stage 1 via exact ReportDeathId, advance to stage 2!
                 byte[] pveBossBody = await WaitForGameEventSchemaAsync(c1, ModeEventSchemas.CreatePveNpcBoss);
                 var advSim = new Rule1BattleSimulation();
                 advSim.Initialize(advBegin, MapDataLoader.BuildFallbackArena(advBegin.MapId), c1.PlayerId, false);
                 advSim.ApplyRemoteMessage(0, ModeEventSchemas.CreatePveNpcBoss, pveBossBody);
                 Assert(advSim.Bosses.Count > 0, "CreatePveNpcBoss did not populate stage NPCs");
+                Assert(advSim.Bosses.All(b => advSim.Map.GetCell(b.CurrentCell.Row, b.CurrentCell.Col).Collision == CellCollision.Open), "PVE NPC spawned on solid tile");
+                advSim.Step(3000, BattleDirection.None, false);
                 uint t = 4000;
+                uint? sampleDropItem = null;
                 foreach (var boss in advSim.Bosses)
                 {
+                    boss.Alive = false;
+                    if (sampleDropItem == null && boss.DropItemIds.Count > 0) sampleDropItem = boss.DropItemIds[0];
                     var die = new PlayerDeathMessage { PlayerId = boss.ReportDeathId, ClientTime = t += 100, PosX = (ushort)boss.PosX, PosY = (ushort)boss.PosY };
                     await c1.SendGameEventTcpAsync(advRoomId, GameEventSchemas.NotifyPlayerDie, die.Marshal());
                 }
+                // Verify TCP NotifyPlayerGetItem (0x0FAF) pickup crediting & golden doorway auto-trigger
+                advSim.Pickups.Add(new FieldPickup { SceneId = sampleDropItem ?? 1u, Cell = advSim.LocalActor.CurrentCell, Hidden = false });
+                advSim.Step(25, BattleDirection.None, false);
+                var advPickupEv = advSim.OutgoingTcpEvents.FirstOrDefault(e => e.schemaId == GameEventSchemas.NotifyPlayerGetItem);
+                Assert(advPickupEv.body != null, "Adventure Arbitrator did not emit TCP 0x0FAF NotifyPlayerGetItem");
+                await c1.SendGameEventTcpAsync(advRoomId, advPickupEv.schemaId, advPickupEv.body);
+                Assert(advSim.AdventureDoorwayActive, "Adventure doorway did not activate after clearing all NPCs");
+                advSim.LocalActor.PosX = advSim.AdventureDoorwayCell.Col * 40 + 20;
+                advSim.LocalActor.PosY = advSim.AdventureDoorwayCell.Row * 40 + 20;
+                advSim.Step(25, BattleDirection.None, false);
+                Assert(advSim.AdventureDoorwayTriggered, "Walking into Adventure doorway did not auto-trigger NextMap");
+
                 await Task.Delay(120);
                 await c1.SendAdventureNextMapAsync(advRoomId, unchecked((uint)advBegin.ContinueId), 0, t + 500);
                 byte[] nextMapBody = await WaitForGameEventSchemaAsync(c1, ModeEventSchemas.NotifyGameNextMap);
@@ -974,9 +990,51 @@ namespace Qqtang.Core.Tests
                 Assert(stage2Begin.MapId != advBegin.MapId && stage2Begin.GameId != advBegin.GameId,
                     $"Adventure NextMap did not advance stage: stage1={advBegin.MapId} stage2={stage2Begin.MapId}");
                 await c1.LeaveRoomAsync(advRoomId);
+                Pass($"Live Solo Adventure Multi-Stage + Loot TCP + Doorway (Stage1={advBegin.MapId} NPCs={advSim.Bosses.Count} -> Stage2={stage2Begin.MapId} GameID={stage2Begin.GameId})");
+
+                // 15. Live Competitive Boss Dungeon E2E on Map 11 (水手 sailorBoss: CreateNpcBoss 0x1389 -> Skill 0x1169 -> 5x Harm 0x10F4 + Drop 0x116B -> Kill 0x0FA7 -> Loot 0x0FAF)
+                ushort bossRoomId = await c1.CreateRoomAsync("BossMap11", RoomPropertyFlag.Standard, RoomGameType.CompetitiveNoItem);
+                Assert((await c1.EnterRoomAsync(bossRoomId, roleId: 1)).ResultId == 0, "C1 Enter Boss room failed");
+                await c1.SelectMapAsync(bossRoomId, mapId: 11, gameType: RoomGameType.CompetitiveNoItem);
+                Assert((await c2.EnterRoomAsync(bossRoomId, roleId: 2)).ResultId == 0, "C2 Enter Boss room failed");
+                await c2.SetReadyAsync(bossRoomId, true);
+                Assert(await c1.StartGameAsync(bossRoomId) == 0, "Boss Map 11 StartGame failed");
+                var bossBegin = await WaitForCommandAsync(c1, GameCommands.GameBeginNotify, p => GameBeginData.ParseLengthPrefixed(p.Payload));
+                byte[] createBossBody = await WaitForGameEventSchemaAsync(c1, ModeEventSchemas.CreateNpcBoss);
+                var bossSim = new Rule1BattleSimulation();
+                bossSim.Initialize(bossBegin, MapDataLoader.BuildFallbackArena(bossBegin.MapId), bossBegin.ArbitratorPlayerId, false);
+                bossSim.ApplyRemoteMessage(0, ModeEventSchemas.CreateNpcBoss, createBossBody);
+                Assert(bossSim.Bosses.Count == 1 && bossSim.Bosses[0].Hp == 5 && bossSim.Bosses[0].Skills.Count > 0,
+                    $"Competitive Boss Map 11 did not spawn Sailor(HP=5, Skills>0): count={bossSim.Bosses.Count}");
+                var arbClient = bossBegin.ArbitratorPlayerId == c1.PlayerId ? c1 : c2;
+                bossSim.Step(6000, BattleDirection.None, false); // triggers Boss Skill 0x1169
+                var skillEv = bossSim.OutgoingTcpEvents.FirstOrDefault(e => e.schemaId == ModeEventSchemas.NotifyNpcUseSkill);
+                Assert(skillEv.body != null, "Competitive Boss did not cast server skill 0x1169");
+                await arbClient.SendGameEventTcpAsync(bossRoomId, skillEv.schemaId, skillEv.body);
+                // 5 flame hits -> 4x non-lethal PlayerBeHarmed (0x10F4) + 5th lethal NotifyPlayerDie (0x0FA7)
+                int harmCount = 0;
+                bool bossDiedSent = false;
+                for (int hit = 0; hit < 5; hit++)
+                {
+                    bossSim.Step(650, BattleDirection.None, false);
+                    var bCell = bossSim.Bosses[0].CurrentCell;
+                    bossSim.Flames.Add(new ActiveFlame { Cell = bCell, OwnerId = bossBegin.ArbitratorPlayerId, ExpireAtMs = bossSim.ElapsedMs + 500 });
+                    bossSim.Step(25, BattleDirection.None, false);
+                    foreach (var ev in bossSim.OutgoingTcpEvents)
+                    {
+                        if (ev.schemaId == ModeEventSchemas.PlayerBeHarmed) harmCount++;
+                        if (ev.schemaId == GameEventSchemas.NotifyPlayerDie) bossDiedSent = true;
+                        await arbClient.SendGameEventTcpAsync(bossRoomId, ev.schemaId, ev.body);
+                    }
+                }
+                Assert(harmCount == 5 && bossDiedSent && !bossSim.Bosses[0].Alive, $"Sailor Boss should take exactly 5 hits (got harm={harmCount}, died={bossDiedSent})");
+                var bossOver = await WaitForGameOverAsync(c1, maxPolls: 280);
+                Assert(bossOver.Results.Count == 2 && bossOver.Results.All(r => r.Result == GameResultCode.Win), "Boss Victory GameOver should mark both players Win");
+                await c1.LeaveRoomAsync(bossRoomId);
+                await c2.LeaveRoomAsync(bossRoomId);
                 await c1.LogoutAsync();
                 await c2.LogoutAsync();
-                Pass($"Live Solo Adventure Multi-Stage Clear (Stage1={advBegin.MapId} NPCs={advSim.Bosses.Count} -> Stage2={stage2Begin.MapId} GameID={stage2Begin.GameId}) & Clean Logout");
+                Pass($"Live Competitive Boss Dungeon Map 11 (Sailor HP=5, Skill=0x1169, 5x Harm=0x10F4, Kill=0x0FA7 -> Co-op Win GameOver) & Clean Logout");
             }
             finally
             {
@@ -1015,9 +1073,9 @@ namespace Qqtang.Core.Tests
             throw new TimeoutException($"Timed out waiting for GameEvent schema 0x{schema:X4}.");
         }
 
-        private static async Task<GameOverData> WaitForGameOverAsync(QqtangSessionClient client)
+        private static async Task<GameOverData> WaitForGameOverAsync(QqtangSessionClient client, int maxPolls = 60)
         {
-            for (int i = 0; i < 60; i++)
+            for (int i = 0; i < maxPolls; i++)
             {
                 while (client.TryDequeueTcpPacket(out var pkt))
                 {

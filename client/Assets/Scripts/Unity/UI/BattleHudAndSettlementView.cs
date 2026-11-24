@@ -315,9 +315,12 @@ namespace Qqtang.UnityClient.UI
                         bossSpeech = $"[BOSS] {boss.SpeechText}";
                 }
             }
+            bool advCleared = !sim.IsOfflineSoloMode && _ctx.Store.GameType == RoomGameType.Adventure && sim.AllBossesDefeated;
+            if (advCleared && string.IsNullOrEmpty(bossSpeech))
+                bossSpeech = "【探险清怪完成】走进金色传送门或点击下方按钮进入下一关（尾关将在 10 秒拾取保护后自动结算）";
             _bossTalkBanner.text = bossSpeech;
             _bossTalkBanner.gameObject.SetActive(!string.IsNullOrEmpty(bossSpeech));
-            _nextStageBtn.gameObject.SetActive(!sim.IsOfflineSoloMode && _ctx.Store.GameType == RoomGameType.Adventure && sim.AllBossesDefeated);
+            _nextStageBtn.gameObject.SetActive(advCleared);
 
             if (sim.BunCarrierPlayerId > 0)
             {

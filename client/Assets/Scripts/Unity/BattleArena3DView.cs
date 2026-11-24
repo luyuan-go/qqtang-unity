@@ -33,6 +33,7 @@ namespace Qqtang.UnityClient
         private readonly List<GameObject> _pooledFieldObjects = new List<GameObject>();
         private readonly List<GameObject> _pooledProjectiles = new List<GameObject>();
         private GameObject _offlineBunOrb;
+        private GameObject _adventureDoorwayPortal;
         private GameObject _localPetVisual;
         private uint _localPetVisualTypeId;
         private GameObject _basePillar1;
@@ -649,6 +650,29 @@ namespace Qqtang.UnityClient
                 SyncBasePillar(ref _basePillar2, _height - 2, _width - 2, new Color(0.24f, 0.56f, 0.96f), sim.TankBaseHpByTeam.TryGetValue(2, out int hp2) ? hp2 : 0);
             }
 
+            // 10. Adventure stage-clear golden doorway portal beacon
+            if (sim.AdventureDoorwayActive)
+            {
+                if (_adventureDoorwayPortal == null)
+                {
+                    _adventureDoorwayPortal = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+                    _adventureDoorwayPortal.name = "AdventureDoorwayPortal";
+                    _adventureDoorwayPortal.transform.SetParent(_dynamicRoot, false);
+                    Destroy(_adventureDoorwayPortal.GetComponent<Collider>());
+                    var mat = new Material(Shader.Find("Sprites/Default"));
+                    mat.color = new Color(1f, 0.86f, 0.22f, 0.72f);
+                    _adventureDoorwayPortal.GetComponent<MeshRenderer>().sharedMaterial = mat;
+                }
+                _adventureDoorwayPortal.SetActive(true);
+                float pulse = 0.85f + 0.14f * Mathf.Sin(Time.time * 5.5f);
+                _adventureDoorwayPortal.transform.localScale = new Vector3(pulse, 0.08f, pulse);
+                _adventureDoorwayPortal.transform.position = CellToWorld(sim.AdventureDoorwayCell.Row, sim.AdventureDoorwayCell.Col, 0.08f);
+            }
+            else if (_adventureDoorwayPortal != null)
+            {
+                _adventureDoorwayPortal.SetActive(false);
+            }
+
             ApplyCameraTransform();
         }
 
@@ -703,6 +727,7 @@ namespace Qqtang.UnityClient
             _pooledFieldObjects.Clear();
             _pooledProjectiles.Clear();
             _offlineBunOrb = null;
+            _adventureDoorwayPortal = null;
             _localPetVisual = null;
             _localPetVisualTypeId = 0;
             _basePillar1 = null;

@@ -17,11 +17,11 @@ qqtang-unity/
 │   │   └── Battle/               MapDataLoader（真实 .map v3/v4 解析）、Rule1BattleSimulation & LocalBattleAiBot（离线 AI）
 │   ├── Assets/Scripts/Unity/     Unity 3D 渲染、道风 UGUI 全模块、AudioPlayer（BGM+SFX）与主控
 │   │   ├── UI/                   UiFactory / LoginPanelView / LobbyAndNavView / RoomPanelView / InventoryShopCraftView / PetAndSocialView / BattleHudAndSettlementView
-│   │   ├── BattleArena3DView.cs  3D 棋盘 + 2D Billboard 角色/头顶悬浮名牌与耐久HP/被困气泡贴图/8种变身道风立绘/多帧动态糖泡与十字火焰/抢包山灵包光环/树冠覆盖层/陷阱香蕉胶水/飞镖斧头弹道/Boss巡逻与血条/基地血柱/灵宠伴飞
+│   │   ├── BattleArena3DView.cs  3D 棋盘 + 2D Billboard 角色/头顶悬浮名牌与耐久HP/被困气泡贴图/8种变身道风立绘/多帧动态糖泡与十字火焰/抢包山灵包光环/探险金色过关传送门/树冠覆盖层/陷阱香蕉胶水/飞镖斧头弹道/Boss巡逻与血条/基地血柱/灵宠伴飞
 │   │   ├── ArtAssetResolver.cs   三级美术回退（道风 19 图集+16角色立绘+4被困+8变身+动态泡焰+胜负徽章 -> 原版 object.pkg/map/*.img 1,336 张解码含380地图缩略图 -> 程序化兜底）
 │   │   └── QqtangGameApp.cs      全流程总控（PlayerPrefs 持久化、异常断线恢复、联机 74 协议 + 7 大离线单机演武与全图选择器）
 │   ├── Assets/Editor/            HeadlessBuilder.cs（命令行无弹窗构建独立 Windows .exe）
-│   └── CoreTests/                .NET 10 单元测试 + 真实 Go 服务端全子系统联机端到端验证（22 项，含探险多关 1601/1637 实测切关）
+│   └── CoreTests/                .NET 10 单元测试 + 真实 Go 服务端全子系统联机端到端验证（23 项，含探险多关拾取切关 + 竞技 BOSS 副本 Map 11 实测）
 ├── tools/
 │   ├── prepare-art-cache.py      本地拉取全部 19 套道家替补图/16 立绘/4 被困/8 变身/多帧泡焰/胜负徽章/21 首音频（869 PNG + 21 WAV）+ 1,336 张原版 .img 解码（含 380 地图缩略图）+ 377 份 .map 与目录同步
 │   ├── build-unity-client.ps1    一键无界面构建独立 Windows 客户端 (local-runtime/build/QqtangDaoistClient.exe)
@@ -44,7 +44,7 @@ qqtang-unity/
 
 ## 快速开始
 
-### 1. 运行全量自动化测试（22 项，含全 9 规则/道具变身/仲裁者单测 + 真实 Go 服务端双端联机与探险多关切图 E2E）
+### 1. 运行全量自动化测试（23 项，含全 9 规则/道具变身/仲裁者单测 + 真实 Go 服务端双端联机、探险多关拾取切关与竞技 BOSS 副本实测 E2E）
 
 ```powershell
 dotnet run --project client/CoreTests/Qqtang.Core.Tests.csproj

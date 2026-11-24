@@ -281,11 +281,15 @@ namespace Qqtang.Core.Battle
         public int PosY;
         public int Hp;
         public int MaxHp;
+        public byte Power = 3;
         public bool Alive = true;
         public uint LastDamagedMs;
+        public uint NextSkillAtMs;
+        public int SkillCursor;
         public string SpeechText = string.Empty;
         public uint SpeechExpireMs;
         public List<uint> DropItemIds = new List<uint>();
+        public List<uint> Skills = new List<uint>();
 
         public GridCell CurrentCell => new GridCell(
             Math.Max(0, PosY / Rule1BattleSimulation.CellSizePixels),
@@ -404,6 +408,9 @@ namespace Qqtang.Core.Battle
         public GameOverData OfflineSettlement { get; private set; }
         public BattleAudioCue StepAudioCues { get; private set; }
         public bool AllBossesDefeated => Bosses.Count > 0 && Bosses.TrueForAll(b => !b.Alive);
+        public bool AdventureDoorwayActive { get; private set; }
+        public GridCell AdventureDoorwayCell { get; private set; }
+        public bool AdventureDoorwayTriggered { get; private set; }
 
         // Outgoing wire events produced during Step()
         public List<(uint schemaId, byte[] body)> OutgoingPeerEvents { get; } = new List<(uint, byte[])>();
@@ -837,6 +844,9 @@ namespace Qqtang.Core.Battle
             TankBaseHpByTeam.Clear();
             SculptureProgressByTeam.Clear();
             OfflineSettlement = null;
+            AdventureDoorwayActive = false;
+            AdventureDoorwayTriggered = false;
+            AdventureDoorwayCell = new GridCell(0, Math.Max(0, Map.Width / 2));
             StepAudioCues = BattleAudioCue.None;
             OutgoingPeerEvents.Clear();
             OutgoingTcpEvents.Clear();
@@ -1858,9 +1868,17 @@ namespace Qqtang.Core.Battle
                         PosX = (ushort)local.PosX,
                         PosY = (ushort)local.PosY
                     };
-                    OutgoingPeerEvents.Add((GameEventSchemas.RequestGetItem, itemMsg.Marshal()));
+                    byte[] itemBody = itemMsg.Marshal();
                     if (LocalPlayerId == ArbitratorPlayerId)
-                        OutgoingPeerEvents.Add((GameEventSchemas.NotifyPlayerGetItem, itemMsg.Marshal()));
+                    {
+                        OutgoingPeerEvents.Add((GameEventSchemas.NotifyPlayerGetItem, itemBody));
+                        OutgoingTcpEvents.Add((GameEventSchemas.NotifyPlayerGetItem, itemBody));
+                    }
+                    else
+                    {
+                        OutgoingPeerEvents.Add((GameEventSchemas.RequestGetItem, itemBody));
+                        OutgoingTcpEvents.Add((GameEventSchemas.RequestGetItem, itemBody));
+                    }
                 }
             }
 
@@ -2008,13 +2026,81 @@ namespace Qqtang.Core.Battle
                     }
                 }
 
+                // Arbitrator casts server-configured Competitive Boss skills (0x1169: SlowGlue 1/10, Transform 3, Pirate/KickBomb 4..9/11..12)
+                if (runAi && !boss.IsPve && boss.Skills.Count > 0 && ElapsedMs >= boss.NextSkillAtMs)
+                {
+                    boss.NextSkillAtMs = ElapsedMs + 6500;
+                    uint rawSkill = boss.Skills[boss.SkillCursor % boss.Skills.Count];
+                    boss.SkillCursor++;
+                    if (rawSkill > 0)
+                    {
+                        var skMsg = new NpcUseSkillEventData
+                        {
+                            ObjectId = boss.BossId,
+                            Time = ElapsedMs,
+                            PosX = (ushort)Math.Max(0, boss.PosX),
+                            PosY = (ushort)Math.Max(0, boss.PosY),
+                            SkillId = (ushort)rawSkill
+                        };
+                        GridCell bc = boss.CurrentCell;
+                        if (rawSkill == 1 || rawSkill == 10)
+                        {
+                            // Slow-glue wave near boss / players
+                            foreach (var a in Actors)
+                            {
+                                if (a.State != ActorLifeState.Active) continue;
+                                GridCell ac = a.CurrentCell;
+                                if (Map.InBounds(ac.Row, ac.Col) && Map.GetCell(ac.Row, ac.Col).Collision == CellCollision.Open)
+                                {
+                                    PlaceFieldObject(43, boss.BossId, ac);
+                                    skMsg.Items.Add((43u, (byte)ac.Row, (byte)ac.Col));
+                                }
+                            }
+                        }
+                        else if (rawSkill == 3)
+                        {
+                            // Great Nian timed transformation item grant
+                            GridCell dropCell = FindOpenCellNear(bc.Row, bc.Col);
+                            Pickups.Add(new FieldPickup { SceneId = 101u, Cell = dropCell, Hidden = false });
+                            skMsg.Items.Add((101u, (byte)dropCell.Row, (byte)dropCell.Col));
+                        }
+                        else
+                        {
+                            // Pirate / KickBomb skill bomb barrage around boss
+                            int[] dr = { -1, 1, 0, 0 };
+                            int[] dc = { 0, 0, -1, 1 };
+                            for (int d = 0; d < 4; d++)
+                            {
+                                GridCell tc = new GridCell(bc.Row + dr[d], bc.Col + dc[d]);
+                                if (Map.InBounds(tc.Row, tc.Col) && Map.GetCell(tc.Row, tc.Col).Collision == CellCollision.Open && !HasBombAt(tc))
+                                {
+                                    Bombs.Add(new ActiveBomb
+                                    {
+                                        BombId = _nextBombId++, OwnerId = boss.BossId, Cell = tc,
+                                        Power = Math.Max((byte)2, boss.Power), PlacedAtMs = ElapsedMs,
+                                        ExplodeAtMs = ElapsedMs + 2200, RemoteOwned = false
+                                    });
+                                }
+                            }
+                        }
+                        if (!IsOfflineSoloMode)
+                        {
+                            byte[] skBody = skMsg.Marshal();
+                            OutgoingPeerEvents.Add((ModeEventSchemas.NotifyNpcUseSkill, skBody));
+                            OutgoingTcpEvents.Add((ModeEventSchemas.NotifyNpcUseSkill, skBody));
+                        }
+                        StepAudioCues |= BattleAudioCue.BombPlace;
+                    }
+                }
+
                 // Flame hit check on boss
                 if (ElapsedMs - boss.LastDamagedMs < 600 || !HasFlameAt(boss.CurrentCell)) continue;
                 boss.LastDamagedMs = ElapsedMs;
-                const ushort loss = 500;
+                ushort loss = boss.MaxHp <= 100 ? (ushort)1 : (ushort)500;
                 boss.Hp = Math.Max(0, boss.Hp - loss);
                 StepAudioCues |= BattleAudioCue.Damage;
-                if (!boss.IsPve && !IsOfflineSoloMode)
+                bool canReportBoss = IsOfflineSoloMode || boss.IsPve || LocalPlayerId == ArbitratorPlayerId;
+                if (!boss.IsPve && !IsOfflineSoloMode && LocalPlayerId == ArbitratorPlayerId)
                 {
                     var harmed = new EntityHarmedEventData
                     {
@@ -2022,7 +2108,28 @@ namespace Qqtang.Core.Battle
                         PosX = (ushort)Math.Max(0, boss.PosX), PosY = (ushort)Math.Max(0, boss.PosY),
                         IsAvatar = false, LossHp = loss
                     };
-                    OutgoingTcpEvents.Add((ModeEventSchemas.PlayerBeHarmed, harmed.Marshal()));
+                    byte[] hBody = harmed.Marshal();
+                    OutgoingPeerEvents.Add((ModeEventSchemas.PlayerBeHarmed, hBody));
+                    OutgoingTcpEvents.Add((ModeEventSchemas.PlayerBeHarmed, hBody));
+
+                    // Non-lethal hit: Arbitrator drops a mid-fight Boss item via 0x116B (server RecordBossSceneDrops)
+                    if (boss.Hp > 0 && boss.DropItemIds.Count > 1)
+                    {
+                        uint hitDrop = boss.DropItemIds[0];
+                        boss.DropItemIds.RemoveAt(0);
+                        GridCell dc = FindOpenCellNear(boss.CurrentCell.Row, boss.CurrentCell.Col);
+                        Pickups.Add(new FieldPickup { SceneId = hitDrop, Cell = dc, Hidden = false });
+                        var dropMsg = new NpcDropItemEventData
+                        {
+                            ObjectId = boss.BossId,
+                            PosX = (ushort)Math.Max(0, boss.PosX),
+                            PosY = (ushort)Math.Max(0, boss.PosY)
+                        };
+                        dropMsg.Items.Add((hitDrop, (byte)dc.Row, (byte)dc.Col));
+                        byte[] dropBody = dropMsg.Marshal();
+                        OutgoingPeerEvents.Add((ModeEventSchemas.NotifyNpcDropItem, dropBody));
+                        OutgoingTcpEvents.Add((ModeEventSchemas.NotifyNpcDropItem, dropBody));
+                    }
                 }
                 if (boss.Hp <= 0)
                 {
@@ -2034,19 +2141,59 @@ namespace Qqtang.Core.Battle
                         PlayerId = deathId, ClientTime = ElapsedMs,
                         PosX = (ushort)Math.Max(0, boss.PosX), PosY = (ushort)Math.Max(0, boss.PosY)
                     };
-                    if (boss.DropItemIds.Count > 0)
+                    int scatterCount = Math.Min(4, boss.DropItemIds.Count);
+                    for (int k = 0; k < scatterCount; k++)
                     {
-                        uint dropId = boss.DropItemIds[0];
-                        GridCell dc = boss.CurrentCell;
+                        uint dropId = boss.DropItemIds[k];
+                        GridCell dc = FindOpenCellNear(boss.CurrentCell.Row + (k % 2), boss.CurrentCell.Col + (k / 2));
                         Pickups.Add(new FieldPickup { SceneId = dropId, Cell = dc, Hidden = false });
                         die.Items.Add(new GameItemCell { ItemId = dropId, Row = (byte)dc.Row, Column = (byte)dc.Col });
                     }
-                    if (!IsOfflineSoloMode)
+                    if (!IsOfflineSoloMode && canReportBoss)
                     {
-                        OutgoingTcpEvents.Add((GameEventSchemas.NotifyPlayerDie, die.Marshal()));
+                        byte[] dieBody = die.Marshal();
+                        OutgoingPeerEvents.Add((GameEventSchemas.NotifyPlayerDie, dieBody));
+                        OutgoingTcpEvents.Add((GameEventSchemas.NotifyPlayerDie, dieBody));
                     }
                 }
             }
+
+            // Online PVE Adventure Doorway activation & auto-trigger when all stage NPCs are cleared
+            if (!IsOfflineSoloMode && Bosses.Count > 0 && Bosses.TrueForAll(b => b.IsPve && !b.Alive))
+            {
+                if (!AdventureDoorwayActive)
+                {
+                    AdventureDoorwayActive = true;
+                    AdventureDoorwayCell = FindOpenCellNear(0, Map.Width / 2);
+                    if (local != null && AdventureDoorwayCell.Equals(local.CurrentCell))
+                        AdventureDoorwayCell = FindOpenCellNear(Map.Height - 1, Map.Width / 2);
+                }
+                if (!AdventureDoorwayTriggered && local != null && local.State == ActorLifeState.Active && local.CurrentCell.Equals(AdventureDoorwayCell))
+                {
+                    AdventureDoorwayTriggered = true;
+                }
+            }
+        }
+
+        private GridCell FindOpenCellNear(int targetRow, int targetCol)
+        {
+            int r0 = Clamp(targetRow, 0, Math.Max(0, Map.Height - 1));
+            int c0 = Clamp(targetCol, 0, Math.Max(0, Map.Width - 1));
+            if (Map.InBounds(r0, c0) && Map.GetCell(r0, c0).Collision == CellCollision.Open)
+                return new GridCell(r0, c0);
+            int maxDist = Math.Max(Map.Width, Map.Height);
+            for (int dist = 1; dist <= maxDist; dist++)
+            {
+                for (int r = Math.Max(0, r0 - dist); r <= Math.Min(Map.Height - 1, r0 + dist); r++)
+                {
+                    for (int c = Math.Max(0, c0 - dist); c <= Math.Min(Map.Width - 1, c0 + dist); c++)
+                    {
+                        if (Math.Abs(r - r0) + Math.Abs(c - c0) == dist && Map.GetCell(r, c).Collision == CellCollision.Open)
+                            return new GridCell(r, c);
+                    }
+                }
+            }
+            return new GridCell(r0, c0);
         }
 
         private void StepOnlineObjectivesAndArbitratorConclusion()
@@ -2545,6 +2692,29 @@ namespace Qqtang.Core.Battle
                     }
                     break;
 
+                case GameEventSchemas.RequestGetItem:
+                {
+                    var req = PlayerItemEventMessage.Parse(body);
+                    if (LocalPlayerId == ArbitratorPlayerId)
+                    {
+                        GridCell gc = new GridCell(req.PosY / CellSizePixels, req.PosX / CellSizePixels);
+                        foreach (var p in Pickups)
+                        {
+                            if (!p.Consumed && p.Cell.Equals(gc) && p.SceneId == req.ItemId)
+                            {
+                                p.Consumed = true;
+                                break;
+                            }
+                        }
+                        var reqGetter = GetActor(req.PlayerId);
+                        if (reqGetter != null) ApplyPickupEffect(reqGetter, req.ItemId, gc);
+                        byte[] relay = req.Marshal();
+                        OutgoingPeerEvents.Add((GameEventSchemas.NotifyPlayerGetItem, relay));
+                        OutgoingTcpEvents.Add((GameEventSchemas.NotifyPlayerGetItem, relay));
+                    }
+                    break;
+                }
+
                 case GameEventSchemas.NotifyPlayerGetItem:
                     var got = PlayerItemEventMessage.Parse(body);
                     var getter = GetActor(got.PlayerId);
@@ -2687,17 +2857,24 @@ namespace Qqtang.Core.Battle
                     var spawned = CreateNpcBossEventData.Parse(body);
                     foreach (var b in spawned.Bosses)
                     {
-                        int r = b.Row > 0 && b.Row < Map.Height ? b.Row : Map.Height / 2;
-                        int c = b.Col > 0 && b.Col < Map.Width ? b.Col : Map.Width / 2;
+                        GridCell spawn = FindOpenCellNear(
+                            b.Row > 0 && b.Row < Map.Height ? b.Row : Map.Height / 2,
+                            b.Col > 0 && b.Col < Map.Width ? b.Col : Map.Width / 2);
                         int maxHp = b.Hp > 0 ? b.Hp : 3000;
                         Bosses.RemoveAll(x => x.BossId == b.BossId);
-                        Bosses.Add(new BattleBossEntity
+                        var entity = new BattleBossEntity
                         {
                             BossId = b.BossId, ReportDeathId = b.BossId, RoleId = b.RoleId, TeamId = b.TeamId, Label = b.Label,
-                            IsPve = false, Hp = maxHp, MaxHp = maxHp, Alive = true,
-                            PosX = c * CellSizePixels + CellSizePixels / 2,
-                            PosY = r * CellSizePixels + CellSizePixels / 2
-                        });
+                            IsPve = false, Hp = maxHp, MaxHp = maxHp, Power = (byte)Math.Max(2, Math.Min(9, (int)b.Power)),
+                            Alive = true, NextSkillAtMs = ElapsedMs + 5500,
+                            PosX = spawn.Col * CellSizePixels + CellSizePixels / 2,
+                            PosY = spawn.Row * CellSizePixels + CellSizePixels / 2
+                        };
+                        foreach (var drop in b.NormalItems)
+                            if (drop.ItemId > 0) entity.DropItemIds.Add(drop.ItemId);
+                        foreach (var sk in b.Skills)
+                            if (sk > 0) entity.Skills.Add(sk);
+                        Bosses.Add(entity);
                     }
                     break;
                 }
@@ -2707,20 +2884,24 @@ namespace Qqtang.Core.Battle
                     var pve = CreatePveNpcBossEventData.Parse(body);
                     ushort nextObj = 30001;
                     int slot = 0;
+                    GridCell localCell = LocalActor != null ? LocalActor.CurrentCell : new GridCell(0, 0);
                     foreach (var g in pve.Groups)
                     {
                         for (int k = 0; k < g.BossCount; k++)
                         {
-                            int r = Math.Min(Map.Height - 2, 2 + (slot * 2) % Math.Max(1, Map.Height - 3));
-                            int c = Math.Min(Map.Width - 2, 2 + (slot * 3) % Math.Max(1, Map.Width - 3));
+                            int tryR = Math.Min(Map.Height - 2, 2 + (slot * 2) % Math.Max(1, Map.Height - 3));
+                            int tryC = Math.Min(Map.Width - 2, 2 + (slot * 3) % Math.Max(1, Map.Width - 3));
+                            GridCell spawn = FindOpenCellNear(tryR, tryC);
+                            if (Math.Abs(spawn.Row - localCell.Row) + Math.Abs(spawn.Col - localCell.Col) <= 2)
+                                spawn = FindOpenCellNear(Map.Height - 1 - localCell.Row, Map.Width - 1 - localCell.Col);
                             slot++;
                             ushort id = nextObj++;
                             var bEntity = new BattleBossEntity
                             {
                                 BossId = id, ReportDeathId = g.BossId, RoleId = (byte)(1 + (g.BossId % 4)), TeamId = 9, Label = g.BossId,
                                 IsPve = true, Hp = 1500, MaxHp = 1500, Alive = true,
-                                PosX = c * CellSizePixels + CellSizePixels / 2,
-                                PosY = r * CellSizePixels + CellSizePixels / 2
+                                PosX = spawn.Col * CellSizePixels + CellSizePixels / 2,
+                                PosY = spawn.Row * CellSizePixels + CellSizePixels / 2
                             };
                             foreach (var drop in g.NormalItems)
                                 if (drop.ItemId > 0) bEntity.DropItemIds.Add(drop.ItemId);
@@ -2736,7 +2917,8 @@ namespace Qqtang.Core.Battle
                     var boss = Bosses.Find(x => x.BossId == h.ObjectId);
                     if (boss != null && boss.Alive)
                     {
-                        boss.Hp = Math.Max(0, boss.Hp - (h.LossHp > 0 ? h.LossHp : 500));
+                        int dmg = h.LossHp > 0 ? h.LossHp : (boss.MaxHp <= 100 ? 1 : 500);
+                        boss.Hp = Math.Max(0, boss.Hp - dmg);
                         if (boss.Hp <= 0) boss.Alive = false;
                         StepAudioCues |= BattleAudioCue.Damage;
                     }

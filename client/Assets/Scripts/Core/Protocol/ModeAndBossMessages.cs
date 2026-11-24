@@ -383,6 +383,24 @@ namespace Qqtang.Core.Protocol
         public ushort SkillId;
         public List<(uint sceneId, byte row, byte col)> Items = new List<(uint, byte, byte)>();
 
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(13 + Items.Count * 6);
+            b.WriteUInt16(ObjectId);
+            b.WriteUInt32(Time);
+            b.WriteUInt16(PosX);
+            b.WriteUInt16(PosY);
+            b.WriteUInt16(SkillId);
+            b.WriteByte((byte)Math.Min(255, Items.Count));
+            for (int i = 0; i < Items.Count && i < 255; i++)
+            {
+                b.WriteUInt32(Items[i].sceneId);
+                b.WriteByte(Items[i].row);
+                b.WriteByte(Items[i].col);
+            }
+            return b.ToArray();
+        }
+
         public static NpcUseSkillEventData Parse(byte[] body)
         {
             var r = new BigEndianReader(body);
