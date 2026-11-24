@@ -62,6 +62,7 @@ namespace Qqtang.UnityClient.UI
             _selectMapBtn = UiFactory.CreateButton(header, "选地图", OpenMapModal, UiFactory.AccentCeladon, fontSize: 13, width: 76f, height: 34f);
             _modeCycleBtn = UiFactory.CreateButton(header, "切模式", CycleRoomMode, UiFactory.AccentMuted, fontSize: 13, width: 76f, height: 34f);
             _bgBtn = UiFactory.CreateButton(header, "换背景", () => _ctx.App.RequestCycleChatBackground(), UiFactory.AccentMuted, fontSize: 13, width: 76f, height: 34f);
+            UiFactory.CreateButton(header, "藏宝室", () => _ctx.App.RequestEnterTreasureRoom(), UiFactory.AccentGold, UiFactory.TextInk, fontSize: 13, width: 72f, height: 34f);
             _settingsBtn = UiFactory.CreateButton(header, "设置", OpenSettingsModal, UiFactory.AccentMuted, fontSize: 13, width: 64f, height: 34f);
             UiFactory.CreateButton(header, "离开房间", () => _ctx.App.RequestLeaveRoom(), UiFactory.AccentDanger, fontSize: 13, width: 86f, height: 34f);
 

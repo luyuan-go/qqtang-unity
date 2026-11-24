@@ -27,6 +27,7 @@ namespace Qqtang.Core.Tests
                 TestUdpChecksumAndRoundTrip();
                 TestGameplayBatchRoundTrip();
                 TestRule1SimulationMechanics();
+                TestOfflineSoloAiAndBossMechanics();
                 TestStaticCatalogs();
                 TestRealMapFileIfPresent();
 
@@ -174,6 +175,66 @@ namespace Qqtang.Core.Tests
             Assert(sim.GetActor(2).State == ActorLifeState.Active, "Remote relive should revive actor");
 
             Pass("Rule-1 BattleSimulation (move, bomb, fuse, blast, needle, shield, relive, emote)");
+        }
+
+        private static void TestOfflineSoloAiAndBossMechanics()
+        {
+            var map = MapDataLoader.BuildFallbackArena(201);
+            var begin = new GameBeginData
+            {
+                GameId = 99, MapId = 201, SpawnSeed = 777, ItemSeed = 888,
+                ArbitratorPlayerId = 1, GameTimeMs = 120_000,
+                Players = new List<PlayerGameInfoData>
+                {
+                    new PlayerGameInfoData { PlayerId = 1, RoleId = 1, TeamId = 1 },
+                    new PlayerGameInfoData { PlayerId = 2, RoleId = 2, TeamId = 2 }
+                },
+                NewItems = new List<GameItemTypeData> { new GameItemTypeData { ItemId = 1, Quantity = 4 } }
+            };
+            var sim = new Rule1BattleSimulation { IsOfflineSoloMode = true };
+            sim.Initialize(begin, map, 1, false);
+            var bot = new LocalBattleAiBot(2, 42);
+            int botStartX = sim.GetActor(2).PosX;
+            int botStartY = sim.GetActor(2).PosY;
+            sim.Step(3000, BattleDirection.None, false);
+
+            bool botPlacedBomb = false;
+            for (int tick = 0; tick < 80 && !sim.IsFinished; tick++)
+            {
+                var (dir, bomb) = bot.Decide(sim);
+                if (bomb) botPlacedBomb = true;
+                sim.StepOfflineBot(2, 50, dir, bomb);
+                sim.Step(50, BattleDirection.None, false);
+            }
+            var botActor = sim.GetActor(2);
+            Assert(botActor.PosX != botStartX || botActor.PosY != botStartY, "Offline AI bot should navigate away from spawn");
+            Assert(botPlacedBomb, "Offline AI bot should place at least one tactical bomb");
+
+            // Test PVE Boss creation (0x138A) + Boss damage (0x10F4) + Bun pickup/delivery (0x0FB7/0x0FB9)
+            var pveBuf = new BigEndianBuffer(32);
+            pveBuf.WriteUInt32(1); // 1 group
+            pveBuf.WriteUInt16(101); // BossID
+            pveBuf.WriteByte(2); // 2 instances
+            pveBuf.WriteUInt16(0); // 0 normal items
+            sim.ApplyRemoteMessage(0, ModeEventSchemas.CreatePveNpcBoss, pveBuf.ToArray());
+            Assert(sim.Bosses.Count == 2 && sim.Bosses[0].Alive, "PVE Boss group should spawn 2 boss entities");
+
+            var harmBody = new EntityHarmedEventData { ObjectId = sim.Bosses[0].BossId, Time = sim.ElapsedMs, PosX = 100, PosY = 100, LossHp = 500 }.Marshal();
+            sim.ApplyRemoteMessage(0, ModeEventSchemas.PlayerBeHarmed, harmBody);
+            Assert(sim.Bosses[0].Hp == 1000, $"Expected boss HP 1000 after 500 loss, got {sim.Bosses[0].Hp}");
+
+            var getBun = new BunActionEventData { PlayerId = 1, ClientTime = sim.ElapsedMs, PosX = 60, PosY = 60, BunId = 1, BunTeamId = 2 }.Marshal();
+            sim.ApplyRemoteMessage(0, ModeEventSchemas.NotifyPlayerGetBun, getBun);
+            Assert(sim.BunCarrierPlayerId == 1, "Bun carrier should be P1");
+            sim.ApplyRemoteMessage(0, ModeEventSchemas.NotifyPlayerPutBun, getBun);
+            Assert(sim.BunCarrierPlayerId == 0 && sim.TeamBunScores[1] == 1, "Team 1 bun score should increment to 1");
+
+            // Force offline elimination -> verify OfflineSettlement generated
+            botActor.State = ActorLifeState.Dead;
+            sim.Step(50, BattleDirection.None, false);
+            Assert(sim.IsFinished && sim.OfflineSettlement != null && sim.OfflineSettlement.Results.Count == 2,
+                "Offline solo mode should generate settlement when only 1 team survives");
+            Pass("Offline Solo AI Bot + PVE Boss (0x138A/0x10F4) + Bun Objective (0x0FB7/0x0FB9)");
         }
 
         private static void TestStaticCatalogs()
@@ -536,27 +597,38 @@ namespace Qqtang.Core.Tests
                 Assert(rem.ResultId == 0, $"RemoveFriend failed: {rem.ResultId}");
                 Pass("Live Friends (Add, Answer, UpdateNotify, FindFriend, List, Remove)");
 
-                // 12. Live Kin (Create -> FetchBase -> FetchMembers -> Declaration -> Notification -> Chat -> Top -> Dismiss)
+                // 12. Live Kin (Create -> FetchBase -> Invite C2 -> C2 Answer -> FetchMembers -> Declaration -> Notification -> Chat -> Top -> Kick C2 -> Dismiss)
                 var kinCreate = await c1.CreateKinAsync("DaoistClan", "WayOfTao");
                 Assert(kinCreate.ErrorNo == 0 && kinCreate.KinIndex > 0, $"CreateKin failed: err={kinCreate.ErrorNo} reason={kinCreate.Reason}");
                 var kinBase = await c1.FetchKinBaseAsync(kinCreate.KinIndex);
                 Assert(kinBase.Index == kinCreate.KinIndex && kinBase.Name == "DaoistClan", $"FetchKinBase mismatch: {kinBase.Name}");
+                var inviteResp = await c1.InviteToKinAsync(kinCreate.KinIndex, c2.Uin);
+                Assert(inviteResp.KinIndex == kinCreate.KinIndex, "InviteToKin response mismatch");
+                var kinInvPush = await WaitForCommandAsync(c2, ExtendedGameCommands.ServerOperateKin, p => KinServerOperationData.Parse(p.Payload));
+                Assert(kinInvPush.KinIndex == kinCreate.KinIndex && kinInvPush.InviterUin == c1.Uin, "C2 did not receive Kin invite");
+                await c2.AnswerKinInviteAsync(c1.Uin, kinCreate.KinIndex, true);
+                var kinJoinedEvent = await WaitForCommandAsync(c1, ExtendedGameCommands.KinEventNotify, p => KinEventNotifyData.Parse(p.Payload));
+                Assert(kinJoinedEvent.EventType == KinConstants.EventMemberJoined && kinJoinedEvent.Uin == c2.Uin, "C1 did not receive Kin join event");
+                var c2KinBase = await c2.FetchKinBaseAsync(kinCreate.KinIndex);
+                Assert(c2KinBase.Index == kinCreate.KinIndex && c2KinBase.Name == "DaoistClan", "C2 FetchKinBase mismatch after joining");
                 var kinMembers = await c1.FetchKinMembersAsync(kinCreate.KinIndex);
-                Assert(kinMembers.Members.Count == 1 && kinMembers.Members[0].Uin == c1.Uin, "FetchKinMembers mismatch");
+                Assert(kinMembers.Members.Count == 2, $"Expected 2 kin members after invite, got {kinMembers.Members.Count}");
                 var declRes = await c1.SetKinDeclarationAsync(kinCreate.KinIndex, "NewDecl");
                 Assert(declRes.Result == 0, $"SetKinDeclaration failed: {declRes.Result}");
                 var notifRes = await c1.SetKinNotificationAsync(kinCreate.KinIndex, "WelcomeAll");
                 Assert(notifRes.Result == 0, $"SetKinNotification failed: {notifRes.Result}");
                 await c1.SendKinChatAsync(kinCreate.KinIndex, "HelloKin");
-                var kChat = await WaitForCommandAsync(c1, ExtendedGameCommands.KinChatNotify, p => KinChatNotifyData.Parse(p.Payload));
-                Assert(kChat.Message == "HelloKin", $"KinChat mismatch: {kChat.Message}");
+                var kChat = await WaitForCommandAsync(c2, ExtendedGameCommands.KinChatNotify, p => KinChatNotifyData.Parse(p.Payload));
+                Assert(kChat.Message == "HelloKin", $"KinChat peer mismatch: {kChat.Message}");
                 var kTop = await c1.FetchKinTopAsync(kinCreate.KinIndex);
                 Assert(kTop.Result == 0, $"FetchKinTop failed: {kTop.Result}");
+                var kickMember = await c1.KickKinMemberAsync(kinCreate.KinIndex, c2.Uin);
+                Assert(kickMember.Result == 0, $"KickKinMember failed: {kickMember.Result}");
                 var dismissRes = await c1.DismissKinAsync(kinCreate.KinIndex);
                 Assert(dismissRes.Result == 0, $"DismissKin failed: {dismissRes.Result}");
-                Pass($"Live Kin (Create#{kinCreate.KinIndex}, Base, Members, Decl, Notif, Chat, Top, Dismiss)");
+                Pass($"Live Kin Full Flow (Create#{kinCreate.KinIndex}, Invite->Join, 2 Members, Decl, Notif, PeerChat, Top, Kick, Dismiss)");
 
-                // 13. Live Marriage (Info -> RequestSpark -> NotifySpark -> AnswerSpark -> ModifyLoveWord -> Divorce) + Logout
+                // 13. Live Marriage + Wedding Ceremony (ChatRoom Bg=5 + ChangeWeddingMode + StartWedding + AnswerWedding + Divorce)
                 var mInit = await c1.GetMarriageInfoAsync();
                 Assert(!mInit.IsMarried, "Should not be married initially");
                 var sparkRes = await c1.RequestSparkAsync(c2.Uin, "MarryMe");
@@ -571,9 +643,21 @@ namespace Qqtang.Core.Tests
                 Assert(lw.Result == 0, $"ModifyLoveWord failed: {lw.Result}");
                 var div = await c1.DivorceAsync(c2.Uin);
                 Assert(div.Result == 0, $"Divorce failed: {div.Result}");
+                Pass("Live Marriage (Info, Spark, Answer, LoveWord, Divorce)");
+
+                // 14. Live Solo Adventure Mode Start (SinglePlayerAdventureCard 99 -> GameBegin + CreatePVENPCBoss 0x138A) & Clean Logout
+                await c1.SetItemStatusAsync(SpecialItemIds.SinglePlayerAdventureCard, 1);
+                ushort advRoomId = await c1.CreateRoomAsync("AdvSoloRoom", RoomPropertyFlag.Standard, RoomGameType.Adventure);
+                var advEnter = await c1.EnterRoomAsync(advRoomId, roleId: 1);
+                Assert(advEnter.ResultId == 0, $"Adventure EnterRoom failed: {advEnter.ResultId}");
+                ushort advStart = await c1.StartGameAsync(advRoomId);
+                Assert(advStart == 0, $"Solo Adventure StartGame failed: 0x{advStart:X4}");
+                var advBegin = await WaitForCommandAsync(c1, GameCommands.GameBeginNotify, p => GameBeginData.ParseLengthPrefixed(p.Payload));
+                Assert(advBegin.GameId > 0 && advBegin.Players.Count == 1, "Adventure GameBegin mismatch");
+                await c1.LeaveRoomAsync(advRoomId);
                 await c1.LogoutAsync();
                 await c2.LogoutAsync();
-                Pass("Live Marriage (Info, Spark, Answer, LoveWord, Divorce) & Clean Logout");
+                Pass($"Live Solo Adventure Start (Room={advRoomId}, GameID={advBegin.GameId}, Map={advBegin.MapId}) & Clean Logout");
             }
             finally
             {

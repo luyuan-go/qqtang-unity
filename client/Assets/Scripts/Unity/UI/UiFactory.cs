@@ -241,6 +241,56 @@ namespace Qqtang.UnityClient.UI
             return toggle;
         }
 
+        public static Slider CreateSlider(
+            Transform parent, string label, float min, float max, float initialValue,
+            Action<float> onChanged = null, float height = 28f)
+        {
+            var row = CreateEmpty(parent, "Slider_" + label);
+            AddHLayout(row.gameObject, 8f, 0, 0);
+            SetLayout(row.gameObject, prefH: height);
+
+            var lbl = CreateText(row, label, 13, TextLight, TextAnchor.MiddleLeft);
+            SetLayout(lbl.gameObject, prefW: 96f, prefH: height);
+
+            var sliderGo = new GameObject("Slider", typeof(RectTransform), typeof(Slider));
+            sliderGo.transform.SetParent(row, false);
+            SetLayout(sliderGo, flexW: 1f, prefH: 20f);
+
+            var bg = CreatePanel(sliderGo.transform, "Background", new Color(0.06f, 0.10f, 0.14f, 1f), BorderSubtle);
+            bg.anchorMin = new Vector2(0f, 0.35f);
+            bg.anchorMax = new Vector2(1f, 0.65f);
+            bg.offsetMin = bg.offsetMax = Vector2.zero;
+
+            var fillArea = CreateEmpty(sliderGo.transform, "FillArea");
+            Stretch(fillArea, 4f, 0f, 4f, 0f);
+            var fill = CreatePanel(fillArea, "Fill", AccentGold);
+            fill.anchorMin = new Vector2(0f, 0.35f);
+            fill.anchorMax = new Vector2(1f, 0.65f);
+            fill.offsetMin = fill.offsetMax = Vector2.zero;
+
+            var handleArea = CreateEmpty(sliderGo.transform, "HandleArea");
+            Stretch(handleArea, 6f, 0f, 6f, 0f);
+            var handle = CreatePanel(handleArea, "Handle", TextLight, AccentGold);
+            handle.sizeDelta = new Vector2(14f, 18f);
+
+            var valTxt = CreateText(row, $"{Mathf.RoundToInt(initialValue * 100f)}%", 12, AccentGold, TextAnchor.MiddleRight);
+            SetLayout(valTxt.gameObject, prefW: 46f, prefH: height);
+
+            var slider = sliderGo.GetComponent<Slider>();
+            slider.fillRect = fill;
+            slider.handleRect = handle;
+            slider.targetGraphic = handle.GetComponent<Image>();
+            slider.minValue = min;
+            slider.maxValue = max;
+            slider.value = Mathf.Clamp(initialValue, min, max);
+            slider.onValueChanged.AddListener(v =>
+            {
+                valTxt.text = $"{Mathf.RoundToInt(v * 100f)}%";
+                onChanged?.Invoke(v);
+            });
+            return slider;
+        }
+
         public static RectTransform CreateScrollView(Transform parent, string name, out RectTransform content, Color? bg = null, float spacing = 6f)
         {
             var root = CreatePanel(parent, name, bg ?? new Color(0.07f, 0.11f, 0.15f, 0.85f), BorderSubtle);

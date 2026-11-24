@@ -6,39 +6,85 @@ using UnityEngine;
 namespace Qqtang.UnityClient
 {
     /// <summary>
-    /// Lightweight runtime PCM WAV loader for optional Daoist audio in StreamingAssets/ArtCache/audio/.
-    /// Safely silent when audio files are not cached locally (zero audio files committed to Git).
+    /// Runtime PCM WAV loader supporting looping BGM (music-lobby / music-battle) and SFX from StreamingAssets/ArtCache/audio/.
+    /// Safely silent when audio files are not downloaded locally (zero audio binaries committed to Git).
     /// </summary>
     public sealed class AudioPlayer : MonoBehaviour
     {
         private AudioSource _sfxSource;
+        private AudioSource _bgmSource;
         private string _audioRoot;
+        private string _currentBgmKey;
         private readonly Dictionary<string, AudioClip> _clips = new Dictionary<string, AudioClip>();
         private readonly HashSet<string> _missing = new HashSet<string>();
+
+        public float MasterVolume { get; set; } = 0.85f;
+        public float BgmVolume { get; set; } = 0.38f;
+        public float SfxVolume { get; set; } = 0.72f;
+        public bool Muted { get; set; }
 
         private void Awake()
         {
             _sfxSource = gameObject.AddComponent<AudioSource>();
             _sfxSource.playOnAwake = false;
             _sfxSource.spatialBlend = 0f;
+
+            _bgmSource = gameObject.AddComponent<AudioSource>();
+            _bgmSource.playOnAwake = false;
+            _bgmSource.loop = true;
+            _bgmSource.spatialBlend = 0f;
+
             _audioRoot = Path.Combine(Application.streamingAssetsPath, "ArtCache", "audio");
         }
 
-        public void PlaySfx(string clipKey, float volume = 0.65f)
+        public void ApplyVolumeSettings()
         {
-            if (string.IsNullOrEmpty(clipKey) || _missing.Contains(clipKey)) return;
-            if (!_clips.TryGetValue(clipKey, out var clip))
+            if (_bgmSource != null)
+                _bgmSource.volume = Muted ? 0f : Mathf.Clamp01(MasterVolume * BgmVolume);
+        }
+
+        public void PlayBgm(string clipKey)
+        {
+            if (string.IsNullOrEmpty(clipKey) || clipKey == _currentBgmKey) return;
+            _currentBgmKey = clipKey;
+            var clip = GetOrLoadClip(clipKey);
+            if (clip == null)
             {
-                string path = Path.Combine(_audioRoot, clipKey + ".wav");
-                clip = TryLoadPcmWav(path, clipKey);
-                if (clip == null)
-                {
-                    _missing.Add(clipKey);
-                    return;
-                }
-                _clips[clipKey] = clip;
+                _bgmSource.Stop();
+                return;
             }
-            _sfxSource.PlayOneShot(clip, Mathf.Clamp01(volume));
+            _bgmSource.clip = clip;
+            ApplyVolumeSettings();
+            _bgmSource.Play();
+        }
+
+        public void StopBgm()
+        {
+            _currentBgmKey = null;
+            if (_bgmSource != null) _bgmSource.Stop();
+        }
+
+        public void PlaySfx(string clipKey, float scale = 1f)
+        {
+            if (Muted || string.IsNullOrEmpty(clipKey)) return;
+            var clip = GetOrLoadClip(clipKey);
+            if (clip == null) return;
+            _sfxSource.PlayOneShot(clip, Mathf.Clamp01(MasterVolume * SfxVolume * scale));
+        }
+
+        private AudioClip GetOrLoadClip(string clipKey)
+        {
+            if (_missing.Contains(clipKey)) return null;
+            if (_clips.TryGetValue(clipKey, out var cached)) return cached;
+            string path = Path.Combine(_audioRoot, clipKey + ".wav");
+            var clip = TryLoadPcmWav(path, clipKey);
+            if (clip == null)
+            {
+                _missing.Add(clipKey);
+                return null;
+            }
+            _clips[clipKey] = clip;
+            return clip;
         }
 
         private static AudioClip TryLoadPcmWav(string path, string name)

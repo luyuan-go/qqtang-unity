@@ -198,6 +198,8 @@ namespace Qqtang.UnityClient.UI
                 UiFactory.SetLayout(row.gameObject, prefH: 42f);
                 UiFactory.AddHLayout(row.gameObject, 8f, 10, 4);
 
+                AddItemIcon(row, it.ItemId);
+
                 bool active = it.Status == 1;
                 string statusTag = active ? "[已装备/启用]" : (it.Status == 2 ? "[已收藏]" : "[背包中]");
                 var lbl = UiFactory.CreateText(row, $"#{it.ItemId}  {name}  ×{it.Quantity}   {statusTag}", 13,
@@ -205,11 +207,26 @@ namespace Qqtang.UnityClient.UI
                 UiFactory.SetLayout(lbl.gameObject, flexW: 1f, prefH: 32f);
 
                 ushort capturedId = it.ItemId;
+                if (_ctx.Store.InRoom)
+                {
+                    UiFactory.CreateButton(row, "使用", () => _ctx.App.RequestUseItemInRoom(capturedId),
+                        UiFactory.AccentVermilion, fontSize: 12, width: 54f, height: 28f);
+                }
                 byte nextStatus = (byte)(active ? 0 : 1);
                 UiFactory.CreateButton(row, active ? "卸下" : "装备/启用",
                     () => _ctx.App.RequestSetItemStatus(capturedId, nextStatus),
                     active ? UiFactory.AccentMuted : UiFactory.AccentCeladon, fontSize: 12, width: 88f, height: 28f);
             }
+        }
+
+        private void AddItemIcon(Transform parent, ushort itemId)
+        {
+            var iconGo = new GameObject("Icon", typeof(RectTransform), typeof(Image));
+            iconGo.transform.SetParent(parent, false);
+            var img = iconGo.GetComponent<Image>();
+            img.sprite = _ctx.Art.GetItemIconSprite(itemId);
+            img.preserveAspect = true;
+            UiFactory.SetLayout(iconGo, prefW: 28f, prefH: 28f);
         }
 
         public void RefreshShop()
@@ -232,6 +249,8 @@ namespace Qqtang.UnityClient.UI
                 var row = UiFactory.CreatePanel(_shopContent, $"Shop_{c.CommodityId}", UiFactory.BgSlateLight);
                 UiFactory.SetLayout(row.gameObject, prefH: 42f);
                 UiFactory.AddHLayout(row.gameObject, 8f, 10, 4);
+
+                AddItemIcon(row, (ushort)c.ItemId);
 
                 var lbl = UiFactory.CreateText(row, $"[{c.CommodityId}] {c.Name}  (道具#{c.ItemId} ×{c.Quantity})", 13, UiFactory.TextLight);
                 UiFactory.SetLayout(lbl.gameObject, flexW: 1f, prefH: 32f);

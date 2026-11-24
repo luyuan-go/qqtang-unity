@@ -90,14 +90,20 @@ namespace Qqtang.Core.State
         public List<KinOrderInfoData> KinHonorTop { get; } = new List<KinOrderInfoData>();
         public List<KinOrderInfoData> KinActiveTop { get; } = new List<KinOrderInfoData>();
 
-        // Marriage
+        // Marriage & Wedding
         public MarriageInfoResponseData Marriage { get; private set; }
         public List<SparkNotifyData> PendingSparks { get; } = new List<SparkNotifyData>();
+        public List<WeddingConfirmNotifyData> PendingWeddings { get; } = new List<WeddingConfirmNotifyData>();
+        public ushort RoomWeddingModeId { get; private set; }
+
+        // Hidden Treasure Room
+        public TreasureRoomResponseData ActiveTreasureRoom { get; set; }
 
         // Battle
         public bool InBattle { get; private set; }
         public GameBeginData CurrentGameBegin { get; private set; }
         public GameOverData LastGameOver { get; private set; }
+        public event Action<GameBeginData> OnNextMapStageReceived;
 
         public void ResetAll()
         {
@@ -679,6 +685,41 @@ namespace Qqtang.Core.State
                         return;
                     }
 
+                    case ExtendedGameCommands.WeddingConfirmNotify:
+                    {
+                        var wc = WeddingConfirmNotifyData.Parse(pkt.Payload);
+                        PendingWeddings.RemoveAll(w => w.ProposerUin == wc.ProposerUin);
+                        PendingWeddings.Add(wc);
+                        PushToast($"收到来自 {wc.Nickname} 的婚礼仪式邀请！");
+                        NotifyChanged();
+                        return;
+                    }
+
+                    case ExtendedGameCommands.AnswerWedding:
+                    {
+                        var aw = AnswerWeddingResultData.Parse(pkt.Payload);
+                        PushToast(aw.Result == 0 ? $"婚礼仪式正式开启！{aw.Word}" : $"婚礼仪式已取消：{aw.Word}");
+                        NotifyChanged();
+                        return;
+                    }
+
+                    case ExtendedGameCommands.ChangeWeddingModeNotify:
+                    {
+                        var wm = ChangeWeddingModeNotifyData.Parse(pkt.Payload);
+                        RoomWeddingModeId = wm.WeddingModeId;
+                        PushToast(wm.WeddingModeId == 1 ? "婚礼场景已切换：中式礼堂" : "婚礼场景已切换：西式教堂");
+                        NotifyChanged();
+                        return;
+                    }
+
+                    case TreasureCommands.TreasureTimeout:
+                    {
+                        ActiveTreasureRoom = null;
+                        PushToast("藏宝室限时已到，自动返回房间");
+                        NotifyChanged();
+                        return;
+                    }
+
                     case GameCommands.GameBeginNotify:
                     {
                         var begin = GameBeginData.ParseLengthPrefixed(pkt.Payload);
@@ -698,6 +739,13 @@ namespace Qqtang.Core.State
                             LastGameOver = GameOverData.Parse(ev.Body);
                             NotifyChanged();
                             OnGameOverReceived?.Invoke(LastGameOver);
+                        }
+                        else if (ev.Schema == ModeEventSchemas.NotifyGameNextMap)
+                        {
+                            var nextStage = GameBeginData.ParseLengthPrefixed(ev.Body);
+                            CurrentGameBegin = nextStage;
+                            NotifyChanged();
+                            OnNextMapStageReceived?.Invoke(nextStage);
                         }
                         else
                         {

@@ -100,6 +100,27 @@ namespace Qqtang.Core.Battle
         public bool Consumed;
     }
 
+    public sealed class BattleBossEntity
+    {
+        public ushort BossId;
+        public byte RoleId;
+        public byte TeamId;
+        public uint Label;
+        public bool IsPve;
+        public int PosX;
+        public int PosY;
+        public int Hp;
+        public int MaxHp;
+        public bool Alive = true;
+        public uint LastDamagedMs;
+        public string SpeechText = string.Empty;
+        public uint SpeechExpireMs;
+
+        public GridCell CurrentCell => new GridCell(
+            Math.Max(0, PosY / Rule1BattleSimulation.CellSizePixels),
+            Math.Max(0, PosX / Rule1BattleSimulation.CellSizePixels));
+    }
+
     /// <summary>
     /// Exact client+0x522F0 3-step LCG from server/internal/game/battleengine/pickup_placement.go.
     /// </summary>
@@ -174,6 +195,12 @@ namespace Qqtang.Core.Battle
         public List<ActiveBomb> Bombs { get; } = new List<ActiveBomb>();
         public List<ActiveFlame> Flames { get; } = new List<ActiveFlame>();
         public List<FieldPickup> Pickups { get; } = new List<FieldPickup>();
+        public List<BattleBossEntity> Bosses { get; } = new List<BattleBossEntity>();
+        public ushort BunCarrierPlayerId { get; private set; }
+        public byte BunTeamId { get; private set; }
+        public Dictionary<byte, int> TeamBunScores { get; } = new Dictionary<byte, int>();
+        public bool IsOfflineSoloMode { get; set; }
+        public GameOverData OfflineSettlement { get; private set; }
 
         // Outgoing wire events produced during Step()
         public List<(uint schemaId, byte[] body)> OutgoingPeerEvents { get; } = new List<(uint, byte[])>();
@@ -361,6 +388,11 @@ namespace Qqtang.Core.Battle
             Bombs.Clear();
             Flames.Clear();
             Pickups.Clear();
+            Bosses.Clear();
+            BunCarrierPlayerId = 0;
+            BunTeamId = 0;
+            TeamBunScores.Clear();
+            OfflineSettlement = null;
             OutgoingPeerEvents.Clear();
             OutgoingTcpEvents.Clear();
             _seenRemoteBombs.Clear();
@@ -496,6 +528,70 @@ namespace Qqtang.Core.Battle
         }
 
         public BattleActor LocalActor => GetActor(LocalPlayerId);
+
+        public void StepOfflineBot(ushort botPlayerId, uint deltaMs, BattleDirection moveInput, bool placeBomb)
+        {
+            if (IsFinished || ElapsedMs < RoundStartClockMs) return;
+            BattleActor bot = GetActor(botPlayerId);
+            if (bot == null || bot.IsLocal || bot.State != ActorLifeState.Active) return;
+
+            bool moving = moveInput != BattleDirection.None;
+            if (moving)
+            {
+                bot.Facing = moveInput;
+                ushort speedPx = SpeedPixelsPerSecondByRate[Math.Min((int)bot.SpeedRate, SpeedPixelsPerSecondByRate.Length - 1)];
+                uint num = speedPx * deltaMs + bot.MoveRemainder;
+                int dist = (int)Math.Min(40u, num / 1000u);
+                bot.MoveRemainder = num % 1000u;
+                if (dist > 0) MoveActorPixels(bot, moveInput, dist);
+            }
+            else
+            {
+                bot.MoveRemainder = 0;
+            }
+            bot.Moving = moving;
+            if (placeBomb) TryPlaceBombForActor(bot, emitWire: false);
+        }
+
+        private void TryPlaceBombForActor(BattleActor actor, bool emitWire)
+        {
+            GridCell cell = actor.CurrentCell;
+            if (!Map.InBounds(cell.Row, cell.Col)) return;
+            var tile = Map.GetCell(cell.Row, cell.Col);
+            if (tile.Collision != CellCollision.Open || tile.MapElementOccupied) return;
+            if (HasBombAt(cell)) return;
+
+            int activeOwned = 0;
+            foreach (var b in Bombs) if (b.OwnerId == actor.PlayerId) activeOwned++;
+            if (activeOwned >= actor.BombCapacity) return;
+
+            uint bombId = _nextBombId++;
+            Bombs.Add(new ActiveBomb
+            {
+                BombId = bombId,
+                OwnerId = actor.PlayerId,
+                Cell = cell,
+                Power = actor.BombPower,
+                PlacedAtMs = ElapsedMs,
+                ExplodeAtMs = ElapsedMs + BombFuseMs + 1,
+                RemoteOwned = false
+            });
+
+            if (emitWire)
+            {
+                var msg = new PlayerUseBombMessage
+                {
+                    PlayerId = actor.PlayerId,
+                    ClientTime = ElapsedMs,
+                    BombId = bombId,
+                    Row = (byte)cell.Row,
+                    Column = (byte)cell.Col,
+                    Power = actor.BombPower,
+                    Property = 0
+                };
+                OutgoingPeerEvents.Add((GameEventSchemas.PlayerUseBomb, msg.Marshal()));
+            }
+        }
 
         public void Step(uint deltaMs, BattleDirection localMoveInput, bool localPlaceBomb)
         {
@@ -939,6 +1035,107 @@ namespace Qqtang.Core.Battle
                     OutgoingTcpEvents.Add((GameEventSchemas.NotifyPlayerDie, body));
                 }
             }
+
+            // 5. Boss / PVE NPC flame damage check -> PlayerBeHarmed (0x10F4) & NotifyPlayerDie (0x0FA7)
+            for (int i = 0; i < Bosses.Count; i++)
+            {
+                var boss = Bosses[i];
+                if (!boss.Alive || ElapsedMs - boss.LastDamagedMs < 600) continue;
+                if (!HasFlameAt(boss.CurrentCell)) continue;
+                boss.LastDamagedMs = ElapsedMs;
+                const ushort loss = 500;
+                boss.Hp = Math.Max(0, boss.Hp - loss);
+                var harmed = new EntityHarmedEventData
+                {
+                    ObjectId = boss.BossId, Time = ElapsedMs,
+                    PosX = (ushort)Math.Max(0, boss.PosX), PosY = (ushort)Math.Max(0, boss.PosY),
+                    IsAvatar = false, LossHp = loss
+                };
+                OutgoingTcpEvents.Add((ModeEventSchemas.PlayerBeHarmed, harmed.Marshal()));
+                if (boss.Hp <= 0)
+                {
+                    boss.Alive = false;
+                    var die = new PlayerDeathMessage
+                    {
+                        PlayerId = boss.BossId, ClientTime = ElapsedMs,
+                        PosX = (ushort)Math.Max(0, boss.PosX), PosY = (ushort)Math.Max(0, boss.PosY)
+                    };
+                    OutgoingTcpEvents.Add((GameEventSchemas.NotifyPlayerDie, die.Marshal()));
+                }
+            }
+
+            // 6. Offline Solo Practice: simulate full combat/pickups/settlement for bot actors too
+            if (IsOfflineSoloMode)
+            {
+                StepOfflineBotsCombatAndSettlement(deltaMs);
+            }
+        }
+
+        private void StepOfflineBotsCombatAndSettlement(uint deltaMs)
+        {
+            foreach (var actor in Actors)
+            {
+                if (actor.IsLocal || actor.State == ActorLifeState.Dead) continue;
+                if (actor.State == ActorLifeState.Active && !actor.IsInvulnerable(ElapsedMs) && HasFlameAt(actor.CurrentCell))
+                {
+                    actor.State = ActorLifeState.Trapped;
+                    actor.TrappedElapsedMs = 0;
+                    actor.Moving = false;
+                }
+                if (actor.State == ActorLifeState.Active)
+                {
+                    GridCell ac = actor.CurrentCell;
+                    foreach (var p in Pickups)
+                    {
+                        if (!p.Hidden && !p.Consumed && p.Cell.Equals(ac))
+                        {
+                            p.Consumed = true;
+                            ApplyPickupEffect(actor, p.SceneId);
+                        }
+                    }
+                    foreach (var other in Actors)
+                    {
+                        if (other.PlayerId == actor.PlayerId || other.State != ActorLifeState.Trapped) continue;
+                        if (Math.Abs(actor.PosX - other.PosX) <= 28 && Math.Abs(actor.PosY - other.PosY) <= 28)
+                        {
+                            if (other.TeamId == actor.TeamId) { other.State = ActorLifeState.Active; other.TrappedElapsedMs = 0; actor.RescueCount++; }
+                            else { other.State = ActorLifeState.Dead; actor.KillCount++; }
+                        }
+                    }
+                }
+                else if (actor.State == ActorLifeState.Trapped)
+                {
+                    actor.TrappedElapsedMs += deltaMs;
+                    if (actor.TrappedElapsedMs >= actor.OxygenMs) actor.State = ActorLifeState.Dead;
+                }
+            }
+
+            // Determine match end if <= 1 team remains alive or time elapsed
+            var aliveTeams = new HashSet<byte>();
+            foreach (var a in Actors) if (a.State != ActorLifeState.Dead) aliveTeams.Add(a.TeamId);
+            if (aliveTeams.Count <= 1 || ElapsedMs >= RoundDurationMs)
+            {
+                IsFinished = true;
+                byte winTeam = 0;
+                if (aliveTeams.Count == 1)
+                    foreach (var t in aliveTeams) winTeam = t;
+
+                var over = new GameOverData { Time = ElapsedMs, GameMode = 0 };
+                foreach (var a in Actors)
+                {
+                    GameResultCode code = winTeam == 0
+                        ? GameResultCode.Draw
+                        : (a.TeamId == winTeam ? GameResultCode.Win : GameResultCode.Loss);
+                    over.Results.Add(new GameResultEntry
+                    {
+                        PlayerId = a.PlayerId,
+                        Result = code,
+                        Point = (uint)(code == GameResultCode.Win ? 200 : (code == GameResultCode.Draw ? 50 : 20)),
+                        Remark = (uint)a.KillCount
+                    });
+                }
+                OfflineSettlement = over;
+            }
         }
 
         public void ApplyRemoteMessage(ushort senderPlayerId, uint schemaId, byte[] body)
@@ -1157,6 +1354,129 @@ namespace Qqtang.Core.Battle
                         {
                             eActor.ActiveEmotionId = emo.EmotionId;
                             eActor.EmotionExpireAtMs = ElapsedMs + 3000;
+                        }
+                    }
+                    break;
+                }
+
+                case ModeEventSchemas.CreateNpcBoss:
+                {
+                    var spawned = CreateNpcBossEventData.Parse(body);
+                    foreach (var b in spawned.Bosses)
+                    {
+                        int r = b.Row > 0 && b.Row < Map.Height ? b.Row : Map.Height / 2;
+                        int c = b.Col > 0 && b.Col < Map.Width ? b.Col : Map.Width / 2;
+                        int maxHp = b.Hp > 0 ? b.Hp : 3000;
+                        Bosses.RemoveAll(x => x.BossId == b.BossId);
+                        Bosses.Add(new BattleBossEntity
+                        {
+                            BossId = b.BossId, RoleId = b.RoleId, TeamId = b.TeamId, Label = b.Label,
+                            IsPve = false, Hp = maxHp, MaxHp = maxHp, Alive = true,
+                            PosX = c * CellSizePixels + CellSizePixels / 2,
+                            PosY = r * CellSizePixels + CellSizePixels / 2
+                        });
+                    }
+                    break;
+                }
+
+                case ModeEventSchemas.CreatePveNpcBoss:
+                {
+                    var pve = CreatePveNpcBossEventData.Parse(body);
+                    ushort nextObj = 30001;
+                    int slot = 0;
+                    foreach (var g in pve.Groups)
+                    {
+                        for (int k = 0; k < g.BossCount; k++)
+                        {
+                            int r = Math.Min(Map.Height - 2, 2 + (slot * 2) % Math.Max(1, Map.Height - 3));
+                            int c = Math.Min(Map.Width - 2, 2 + (slot * 3) % Math.Max(1, Map.Width - 3));
+                            slot++;
+                            ushort id = nextObj++;
+                            Bosses.Add(new BattleBossEntity
+                            {
+                                BossId = id, RoleId = (byte)(1 + (g.BossId % 4)), TeamId = 9, Label = g.BossId,
+                                IsPve = true, Hp = 1500, MaxHp = 1500, Alive = true,
+                                PosX = c * CellSizePixels + CellSizePixels / 2,
+                                PosY = r * CellSizePixels + CellSizePixels / 2
+                            });
+                        }
+                    }
+                    break;
+                }
+
+                case ModeEventSchemas.PlayerBeHarmed:
+                {
+                    var h = EntityHarmedEventData.Parse(body);
+                    var boss = Bosses.Find(x => x.BossId == h.ObjectId);
+                    if (boss != null && boss.Alive)
+                    {
+                        boss.Hp = Math.Max(0, boss.Hp - (h.LossHp > 0 ? h.LossHp : 500));
+                        if (boss.Hp <= 0) boss.Alive = false;
+                    }
+                    break;
+                }
+
+                case ModeEventSchemas.NotifyNpcUseSkill:
+                {
+                    var sk = NpcUseSkillEventData.Parse(body);
+                    foreach (var it in sk.Items)
+                    {
+                        if (Map.InBounds(it.row, it.col))
+                            AddFlame(new GridCell(it.row, it.col), sk.ObjectId);
+                    }
+                    break;
+                }
+
+                case ModeEventSchemas.NotifyNpcTalk:
+                {
+                    var talk = NpcTalkEventData.Parse(body);
+                    var boss = Bosses.Find(x => x.BossId == talk.ObjectId);
+                    if (boss != null) { boss.SpeechText = talk.Words; boss.SpeechExpireMs = ElapsedMs + 3500; }
+                    break;
+                }
+
+                case ModeEventSchemas.RequestGetBun:
+                case ModeEventSchemas.NotifyPlayerGetBun:
+                {
+                    var bun = BunActionEventData.Parse(body);
+                    BunCarrierPlayerId = bun.PlayerId;
+                    BunTeamId = bun.BunTeamId;
+                    break;
+                }
+
+                case ModeEventSchemas.RequestPutBun:
+                case ModeEventSchemas.NotifyPlayerPutBun:
+                {
+                    var bun = BunActionEventData.Parse(body);
+                    if (BunCarrierPlayerId == bun.PlayerId) BunCarrierPlayerId = 0;
+                    var actor = GetActor(bun.PlayerId);
+                    if (actor != null)
+                    {
+                        TeamBunScores.TryGetValue(actor.TeamId, out int cur);
+                        TeamBunScores[actor.TeamId] = cur + 1;
+                    }
+                    break;
+                }
+
+                case ModeEventSchemas.NotifyPreparedUseProp:
+                {
+                    var prop = PreparedUsePropEventData.Parse(body);
+                    var pActor = GetActor(prop.PlayerId);
+                    if (pActor != null)
+                    {
+                        if (pActor.State == ActorLifeState.Dead)
+                        {
+                            pActor.State = ActorLifeState.Active;
+                            pActor.ShieldActiveUntilMs = ElapsedMs + 2000;
+                        }
+                        else if (pActor.State == ActorLifeState.Trapped)
+                        {
+                            pActor.State = ActorLifeState.Active;
+                            pActor.TrappedElapsedMs = 0;
+                        }
+                        else
+                        {
+                            pActor.ShieldActiveUntilMs = ElapsedMs + 2500;
                         }
                     }
                     break;

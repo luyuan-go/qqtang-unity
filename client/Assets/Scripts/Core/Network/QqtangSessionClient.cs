@@ -595,6 +595,68 @@ namespace Qqtang.Core.Network
             await SendGameEventTcpAsync(roomId, ExtendedGameEventSchemas.NotifyUseEmotion, body, ct).ConfigureAwait(false);
         }
 
+        // --- Wedding Ceremony, Hidden Treasure Room, Adventure NextMap, Prepared Props ---
+
+        public async Task<StartWeddingResponseData> StartWeddingAsync(uint targetUin, ushort weddingModeId, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildStartWeddingPayload(Uin, targetUin, weddingModeId);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.StartWedding, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return StartWeddingResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<AnswerWeddingResultData> AnswerWeddingAsync(uint proposerUin, bool accepted, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildAnswerWeddingPayload(Uin, proposerUin, accepted);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.AnswerWedding, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return AnswerWeddingResultData.Parse(reply.Payload);
+        }
+
+        public async Task<ChangeWeddingModeResponseData> ChangeWeddingModeAsync(ushort weddingModeId, CancellationToken ct = default)
+        {
+            byte[] payload = ModeRequestBuilder.BuildChangeWeddingModePayload(Uin, weddingModeId);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.ChangeWeddingMode, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return ChangeWeddingModeResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<TreasureRoomResponseData> EnterTreasureRoomAsync(CancellationToken ct = default)
+        {
+            byte[] payload = ModeRequestBuilder.BuildTreasureRoomPayload(Uin, NextClientTime());
+            DecodedLocalPacket reply = await SendRequestAsync(TreasureCommands.EnterTreasure, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return TreasureRoomResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<ushort> GetTreasureItemAsync(uint itemId, CancellationToken ct = default)
+        {
+            byte[] payload = ModeRequestBuilder.BuildTreasureItemPayload(Uin, NextClientTime(), itemId);
+            DecodedLocalPacket reply = await SendRequestAsync(TreasureCommands.GetTreasureItem, 2, SectionId, payload, ct).ConfigureAwait(false);
+            var r = new BigEndianReader(reply.Payload);
+            return r.ReadUInt16();
+        }
+
+        public async Task LeaveTreasureRoomAsync(CancellationToken ct = default)
+        {
+            byte[] payload = ModeRequestBuilder.BuildTreasureRoomPayload(Uin, NextClientTime());
+            await SendOneWayAsync(TreasureCommands.LeaveTreasure, 2, SectionId, payload, ct).ConfigureAwait(false);
+        }
+
+        public async Task SendAdventureNextMapAsync(ushort roomId, uint continueId, uint nextMapId, uint gameTimeMs, CancellationToken ct = default)
+        {
+            var req = new GameNextMapRequestData { PlayerId = PlayerId, ClientTime = gameTimeMs, ContinueId = continueId, NextMapId = nextMapId };
+            await SendGameEventTcpAsync(roomId, ModeEventSchemas.RequestGameNextMap, req.Marshal(), ct).ConfigureAwait(false);
+        }
+
+        public async Task SendPreparedUsePropAsync(ushort roomId, uint itemId, ushort posX, ushort posY, CancellationToken ct = default)
+        {
+            var ev = new PreparedUsePropEventData { PlayerId = PlayerId, ItemId = itemId, PosX = posX, PosY = posY };
+            await SendGameEventTcpAsync(roomId, ModeEventSchemas.RequestPreparedUseProp, ev.Marshal(), ct).ConfigureAwait(false);
+        }
+
+        public async Task SendBunActionAsync(ushort roomId, ushort schema, ushort posX, ushort posY, byte bunId, byte bunTeamId, uint gameTimeMs, CancellationToken ct = default)
+        {
+            var ev = new BunActionEventData { PlayerId = PlayerId, ClientTime = gameTimeMs, PosX = posX, PosY = posY, BunId = bunId, BunTeamId = bunTeamId };
+            await SendGameEventTcpAsync(roomId, schema, ev.Marshal(), ct).ConfigureAwait(false);
+        }
+
         public async Task SendPeerGameplayAsync(
             uint gameId,
             uint gameTimeMs,

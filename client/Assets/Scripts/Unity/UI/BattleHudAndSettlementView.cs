@@ -16,6 +16,7 @@ namespace Qqtang.UnityClient.UI
         public readonly RectTransform HudRoot;
         public readonly RectTransform PauseModal;
         public readonly RectTransform SettlementRoot;
+        public readonly RectTransform TreasureModal;
 
         private readonly Text _timerText;
         private readonly Text _mapAndArtText;
@@ -24,10 +25,22 @@ namespace Qqtang.UnityClient.UI
         private readonly Text _hotbarText;
         private readonly Text _readyBannerText;
 
+        // In-battle mini chat
+        private readonly RectTransform _miniChatFeed;
+        private readonly RectTransform _miniChatInputRow;
+        private readonly InputField _miniChatInput;
+        private int _lastMiniChatCount = -1;
+
+        // Hidden Treasure Room overlay
+        private readonly Text _treasureTitle;
+        private readonly RectTransform _treasureContent;
+
         private readonly Text _settlementTitle;
+        private readonly Text _settlementReturnLabel;
         private readonly RectTransform _scoreboardContent;
 
         public bool IsPauseOpen => PauseModal.gameObject.activeSelf;
+        public bool IsChatInputFocused => _miniChatInputRow.gameObject.activeSelf && _miniChatInput != null && _miniChatInput.isFocused;
 
         public BattleHudAndSettlementView(Transform parent, UiContext ctx)
         {
@@ -80,6 +93,26 @@ namespace Qqtang.UnityClient.UI
             UiFactory.CreateButton(botBar, "护盾(2)", () => _ctx.App.TriggerBattleWorldItem(41), UiFactory.AccentCeladon, fontSize: 12, width: 70f, height: 32f);
             UiFactory.CreateButton(botBar, "表情(E)", () => _ctx.App.TriggerBattleEmotion(1), UiFactory.AccentMuted, fontSize: 12, width: 70f, height: 32f);
 
+            // In-battle Mini Chat (bottom-left above bottom bar)
+            var miniChatBox = UiFactory.CreateEmpty(HudRoot, "BattleMiniChat");
+            miniChatBox.anchorMin = new Vector2(0f, 0f);
+            miniChatBox.anchorMax = new Vector2(0f, 0f);
+            miniChatBox.pivot = new Vector2(0f, 0f);
+            miniChatBox.anchoredPosition = new Vector2(14f, 62f);
+            miniChatBox.sizeDelta = new Vector2(360f, 150f);
+            UiFactory.AddVLayout(miniChatBox.gameObject, 4f, 0, 0);
+
+            _miniChatFeed = UiFactory.CreatePanel(miniChatBox, "Feed", new Color(0.05f, 0.08f, 0.11f, 0.52f));
+            UiFactory.SetLayout(_miniChatFeed.gameObject, flexW: 1f, flexH: 1f);
+            UiFactory.AddVLayout(_miniChatFeed.gameObject, 2f, 8, 4);
+
+            _miniChatInputRow = UiFactory.CreatePanel(miniChatBox, "InputRow", new Color(0.08f, 0.13f, 0.17f, 0.92f), UiFactory.BorderGold);
+            UiFactory.SetLayout(_miniChatInputRow.gameObject, flexW: 1f, prefH: 34f);
+            UiFactory.AddHLayout(_miniChatInputRow.gameObject, 6f, 6, 3);
+            _miniChatInput = UiFactory.CreateInputField(_miniChatInputRow, "按 Enter 发送局内聊天...", "", height: 26f);
+            UiFactory.CreateButton(_miniChatInputRow, "发", SendMiniChat, UiFactory.AccentCeladon, fontSize: 12, width: 42f, height: 26f);
+            _miniChatInputRow.gameObject.SetActive(false);
+
             // --- ESC PAUSE MODAL ---
             PauseModal = UiFactory.CreatePanel(parent, "BattlePauseModal", UiFactory.BgModalBackdrop);
             UiFactory.Stretch(PauseModal);
@@ -90,7 +123,7 @@ namespace Qqtang.UnityClient.UI
             var pTitle = UiFactory.CreateText(pCard, "对局菜单", 20, UiFactory.AccentGold, TextAnchor.MiddleCenter, FontStyle.Bold);
             UiFactory.SetLayout(pTitle.gameObject, prefH: 30f);
             UiFactory.CreateButton(pCard, "继续对局", () => PauseModal.gameObject.SetActive(false), UiFactory.AccentCeladon, fontSize: 15, height: 42f);
-            UiFactory.CreateButton(pCard, "放弃本局并返回大厅", () =>
+            UiFactory.CreateButton(pCard, "放弃本局并返回", () =>
             {
                 PauseModal.gameObject.SetActive(false);
                 _ctx.App.RequestLeaveRoom();
@@ -111,7 +144,25 @@ namespace Qqtang.UnityClient.UI
             var sbScroll = UiFactory.CreateScrollView(sCard, "Scoreboard", out _scoreboardContent, spacing: 6f);
             UiFactory.SetLayout(sbScroll.gameObject, flexW: 1f, flexH: 1f);
 
-            UiFactory.CreateButton(sCard, "返回等待房间", () => _ctx.App.ReturnToRoomAfterSettlement(), UiFactory.AccentVermilion, fontSize: 17, height: 46f);
+            var retBtn = UiFactory.CreateButton(sCard, "返回等待房间", () => _ctx.App.ReturnToRoomAfterSettlement(), UiFactory.AccentVermilion, fontSize: 17, height: 46f);
+            _settlementReturnLabel = retBtn.GetComponentInChildren<Text>();
+
+            // --- HIDDEN TREASURE ROOM MODAL ---
+            TreasureModal = UiFactory.CreatePanel(parent, "TreasureRoomModal", UiFactory.BgModalBackdrop);
+            UiFactory.Stretch(TreasureModal);
+            var tCard = UiFactory.CreatePanel(TreasureModal, "TreasureCard", UiFactory.BgSlateCard, UiFactory.AccentGold);
+            tCard.anchorMin = tCard.anchorMax = tCard.pivot = new Vector2(0.5f, 0.5f);
+            tCard.sizeDelta = new Vector2(520f, 420f);
+            UiFactory.AddVLayout(tCard.gameObject, 10f, 20, 18);
+
+            _treasureTitle = UiFactory.CreateText(tCard, "隐藏藏宝室", 22, UiFactory.AccentGold, TextAnchor.MiddleCenter, FontStyle.Bold);
+            UiFactory.SetLayout(_treasureTitle.gameObject, prefH: 34f);
+
+            var tScroll = UiFactory.CreateScrollView(tCard, "TreasureScroll", out _treasureContent, spacing: 6f);
+            UiFactory.SetLayout(tScroll.gameObject, flexW: 1f, flexH: 1f);
+
+            UiFactory.CreateButton(tCard, "离开藏宝室", () => _ctx.App.RequestLeaveTreasureRoom(), UiFactory.AccentMuted, fontSize: 15, height: 40f);
+            TreasureModal.gameObject.SetActive(false);
 
             HudRoot.gameObject.SetActive(false);
             SettlementRoot.gameObject.SetActive(false);
@@ -120,7 +171,11 @@ namespace Qqtang.UnityClient.UI
         public void SetHudVisible(bool visible)
         {
             HudRoot.gameObject.SetActive(visible);
-            if (!visible) PauseModal.gameObject.SetActive(false);
+            if (!visible)
+            {
+                PauseModal.gameObject.SetActive(false);
+                _miniChatInputRow.gameObject.SetActive(false);
+            }
         }
 
         public void TogglePause()
@@ -128,6 +183,64 @@ namespace Qqtang.UnityClient.UI
             if (!HudRoot.gameObject.activeSelf) return;
             PauseModal.gameObject.SetActive(!PauseModal.gameObject.activeSelf);
         }
+
+        public void ToggleBattleChat()
+        {
+            if (!HudRoot.gameObject.activeSelf || IsPauseOpen) return;
+            if (!_miniChatInputRow.gameObject.activeSelf)
+            {
+                _miniChatInputRow.gameObject.SetActive(true);
+                _miniChatInput.text = string.Empty;
+                _miniChatInput.ActivateInputField();
+                _miniChatInput.Select();
+            }
+            else
+            {
+                SendMiniChat();
+            }
+        }
+
+        private void SendMiniChat()
+        {
+            string txt = (_miniChatInput.text ?? string.Empty).Trim();
+            _miniChatInput.text = string.Empty;
+            _miniChatInputRow.gameObject.SetActive(false);
+            if (!string.IsNullOrEmpty(txt))
+                _ctx.App.RequestSendRoomChat(txt);
+        }
+
+        public void ShowTreasureRoom(TreasureRoomResponseData data)
+        {
+            if (data == null) return;
+            TreasureModal.gameObject.SetActive(true);
+            _treasureTitle.text = $"隐藏藏宝室 (地图 #{data.MapId} · {data.Items.Count} 件宝物)";
+            UiFactory.ClearChildren(_treasureContent);
+            if (data.Items.Count == 0)
+            {
+                var empty = UiFactory.CreateText(_treasureContent, "宝物已全部拾取完毕！", 14, UiFactory.TextSubtle, TextAnchor.MiddleCenter);
+                UiFactory.SetLayout(empty.gameObject, prefH: 48f);
+                return;
+            }
+            foreach (var it in data.Items)
+            {
+                var row = UiFactory.CreatePanel(_treasureContent, $"Tr_{it.ItemId}", UiFactory.BgSlateLight);
+                UiFactory.SetLayout(row.gameObject, prefH: 40f);
+                UiFactory.AddHLayout(row.gameObject, 8f, 10, 4);
+                var iconGo = new GameObject("Icon", typeof(RectTransform), typeof(Image));
+                iconGo.transform.SetParent(row, false);
+                var img = iconGo.GetComponent<Image>();
+                img.sprite = _ctx.Art.GetItemIconSprite(it.ItemId);
+                img.preserveAspect = true;
+                UiFactory.SetLayout(iconGo, prefW: 26f, prefH: 26f);
+
+                var lbl = UiFactory.CreateText(row, $"#{it.ItemId} {_ctx.Catalogs.GetItemName(it.ItemId)} ×{it.Quantity}", 13, UiFactory.AccentGold);
+                UiFactory.SetLayout(lbl.gameObject, flexW: 1f, prefH: 28f);
+                uint capturedId = it.ItemId;
+                UiFactory.CreateButton(row, "拾取", () => _ctx.App.RequestGetTreasureItem(capturedId), UiFactory.AccentVermilion, fontSize: 12, width: 64f, height: 28f);
+            }
+        }
+
+        public void HideTreasureRoom() => TreasureModal.gameObject.SetActive(false);
 
         public void UpdateHud(Rule1BattleSimulation sim, ushort mapId)
         {
@@ -138,7 +251,8 @@ namespace Qqtang.UnityClient.UI
 
             string artTag = _ctx.Art.GetResolvedSource("characters/role_0_S");
             string artLabel = artTag == "daoist" ? "道风重制" : (artTag == "original" ? "原版兜底" : "程序渲染");
-            _mapAndArtText.text = $"地图: {_ctx.Catalogs.GetMapName(mapId)} ({mapId})  [{artLabel}]";
+            string modePrefix = sim.IsOfflineSoloMode ? "[离线演武] " : string.Empty;
+            _mapAndArtText.text = $"{modePrefix}{_ctx.Catalogs.GetMapName(mapId)} ({mapId}) [{artLabel}]";
 
             if (sim.ElapsedMs < Rule1BattleSimulation.RoundStartClockMs)
             {
@@ -162,6 +276,20 @@ namespace Qqtang.UnityClient.UI
                 string st = a.State == ActorLifeState.Active ? "战" : (a.State == ActorLifeState.Trapped ? "泡" : "亡");
                 summary += $"[队{a.TeamId} P{a.PlayerId}:{st}] ";
             }
+            foreach (var boss in sim.Bosses)
+            {
+                if (boss.Alive)
+                    summary += $"| BOSS:{boss.Hp}/{boss.MaxHp} ";
+            }
+            if (sim.BunCarrierPlayerId > 0)
+            {
+                summary += $"| 包子携带:P{sim.BunCarrierPlayerId} ";
+            }
+            else if (sim.TeamBunScores.Count > 0)
+            {
+                summary += "| 包子得分:";
+                foreach (var kv in sim.TeamBunScores) summary += $"队{kv.Key}={kv.Value} ";
+            }
             _participantsText.text = summary;
 
             var local = sim.LocalActor;
@@ -172,15 +300,34 @@ namespace Qqtang.UnityClient.UI
                 _localStatsText.text = $"泡:{local.BombCapacity}/{local.MaxBombCapacity}  威:{local.BombPower}/{local.MaxBombPower}  速:{local.SpeedRate}/{local.MaxSpeedRate}{shield}{kick}";
                 _hotbarText.text = $"针×{local.NeedleCount}  护盾×{local.ShieldCount}  遥控×{local.RemoteDetonatorCount}  击杀:{local.KillCount}  救援:{local.RescueCount}";
             }
+
+            // Refresh mini chat feed only when message count changes
+            var chat = _ctx.Store.RoomChat;
+            if (!sim.IsOfflineSoloMode && chat.Count != _lastMiniChatCount)
+            {
+                _lastMiniChatCount = chat.Count;
+                UiFactory.ClearChildren(_miniChatFeed);
+                int start = Math.Max(0, chat.Count - 5);
+                for (int i = start; i < chat.Count; i++)
+                {
+                    var m = chat[i];
+                    var t = UiFactory.CreateText(_miniChatFeed, $"{m.Sender}: {m.Content}", 12, m.Highlight ? UiFactory.AccentGold : UiFactory.TextLight);
+                    UiFactory.SetLayout(t.gameObject, prefH: 18f);
+                }
+            }
+            _miniChatFeed.gameObject.SetActive(!sim.IsOfflineSoloMode && chat.Count > 0);
         }
 
-        public void ShowSettlement(GameOverData over)
+        public void ShowSettlement(GameOverData over, bool isOfflineSolo = false)
         {
             SetHudVisible(false);
             SettlementRoot.gameObject.SetActive(true);
+            if (_settlementReturnLabel != null)
+                _settlementReturnLabel.text = isOfflineSolo ? "返回登录界面" : "返回等待房间";
             UiFactory.ClearChildren(_scoreboardContent);
 
-            var myRes = over?.Results.Find(r => r.PlayerId == _ctx.Store.PlayerId);
+            ushort myPid = isOfflineSolo ? (ushort)1 : _ctx.Store.PlayerId;
+            var myRes = over?.Results.Find(r => r.PlayerId == myPid);
             if (myRes != null)
             {
                 _settlementTitle.text = myRes.Result == GameResultCode.Win ? "大 获 全 胜"
@@ -197,12 +344,20 @@ namespace Qqtang.UnityClient.UI
             {
                 foreach (var r in over.Results)
                 {
-                    var member = _ctx.Store.RoomMembers.Find(m => m.PlayerId == r.PlayerId);
-                    string name = member != null ? member.Nickname : $"玩家 #{r.PlayerId}";
+                    string name;
+                    if (isOfflineSolo)
+                    {
+                        name = r.PlayerId == 1 ? "道长 (你)" : $"离线道友 AI #{r.PlayerId - 1}";
+                    }
+                    else
+                    {
+                        var member = _ctx.Store.RoomMembers.Find(m => m.PlayerId == r.PlayerId);
+                        name = member != null ? member.Nickname : $"玩家 #{r.PlayerId}";
+                    }
                     string outcome = r.Result == GameResultCode.Win ? "胜利" : (r.Result == GameResultCode.Draw ? "平局" : "失败");
 
                     var row = UiFactory.CreatePanel(_scoreboardContent, $"Res_{r.PlayerId}", UiFactory.BgSlateLight,
-                        r.PlayerId == _ctx.Store.PlayerId ? UiFactory.AccentGold : UiFactory.BorderSubtle);
+                        r.PlayerId == myPid ? UiFactory.AccentGold : UiFactory.BorderSubtle);
                     UiFactory.SetLayout(row.gameObject, prefH: 44f);
                     UiFactory.AddHLayout(row.gameObject, 10f, 14, 6);
 

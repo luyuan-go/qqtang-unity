@@ -60,6 +60,30 @@ CORE_DAOIST_ASSETS: Dict[str, str] = {
     "ui/logo": "assets/branding/linghu-wordmark-login-1024.png",
 }
 
+DAOIST_AUDIO_CLIPS: List[str] = [
+    "bubble-burst",
+    "bubble-kick",
+    "bubble-place",
+    "bun-delivery",
+    "damage",
+    "defeat",
+    "draw",
+    "eliminated",
+    "music-battle",
+    "music-lobby",
+    "needle",
+    "pickup",
+    "rescued",
+    "respawn",
+    "shield",
+    "trapped",
+    "ui-click",
+    "victory",
+    "wave",
+    "wood-break",
+    "wood-push",
+]
+
 
 def encode_rgba_png(width: int, height: int, rgba: bytes) -> bytes:
     """Minimal stdlib PNG encoder (RGBA8) so no Pillow dependency is required."""
@@ -193,9 +217,32 @@ def sync_local_maps(original_client: Path, maps_out: Path) -> int:
     return copied
 
 
+def sync_catalogs(repo_root: Path, original_client: Path, catalogs_out: Path) -> int:
+    """Copy server JSON catalogs and optional Commodity.ini into gitignored StreamingAssets/Catalogs for standalone builds."""
+    catalogs_out.mkdir(parents=True, exist_ok=True)
+    server_dir = repo_root / "server"
+    candidates = [
+        server_dir / "data" / "qqt_competitive_map_rules.json",
+        server_dir / "data" / "qqt_combine_recipes.json",
+        server_dir / "data" / "qqt_pet_catalog.json",
+        server_dir / "docs" / "item-id-catalog.json",
+        original_client / "Commodity.ini",
+        original_client / "config" / "Commodity.ini",
+        server_dir / "data" / "Commodity.ini",
+    ]
+    copied = 0
+    seen = set()
+    for src in candidates:
+        if src.is_file() and src.name not in seen:
+            shutil.copy2(src, catalogs_out / src.name)
+            seen.add(src.name)
+            copied += 1
+    return copied
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent
-    parser = argparse.ArgumentParser(description="Prepare local StreamingAssets ArtCache & LocalMaps")
+    parser = argparse.ArgumentParser(description="Prepare local StreamingAssets ArtCache, Audio, Catalogs & LocalMaps")
     parser.add_argument("--remake-dir", type=Path, default=None, help="Local clone of qqtang-daoist-remake")
     parser.add_argument(
         "--original-client",
@@ -205,27 +252,35 @@ def main() -> int:
     )
     parser.add_argument("--families", type=str, default="town,common,box,bomb", help="Map families or 'all'")
     parser.add_argument("--max-fallback", type=int, default=64, help="Max original .img fallbacks to decode per run (0=all)")
-    parser.add_argument("--skip-remote", action="store_true", help="Skip fetching remote daoist-remake PNGs")
+    parser.add_argument("--max-icons", type=int, default=120, help="Max Daoist item icons to download from assets/items/art.json (0=all)")
+    parser.add_argument("--no-audio", action="store_true", help="Skip downloading Daoist WAV audio clips")
+    parser.add_argument("--no-icons", action="store_true", help="Skip downloading Daoist item icons")
+    parser.add_argument("--skip-remote", action="store_true", help="Skip fetching remote daoist-remake assets")
     args = parser.parse_args()
 
     art_out = repo_root / "client" / "Assets" / "StreamingAssets" / "ArtCache"
     maps_out = repo_root / "client" / "Assets" / "StreamingAssets" / "LocalMaps"
+    catalogs_out = repo_root / "client" / "Assets" / "StreamingAssets" / "Catalogs"
     daoist_dir = art_out / "daoist"
     orig_dir = art_out / "original"
+    audio_dir = art_out / "audio"
     daoist_dir.mkdir(parents=True, exist_ok=True)
     orig_dir.mkdir(parents=True, exist_ok=True)
+    audio_dir.mkdir(parents=True, exist_ok=True)
 
     manifest: Dict[str, Dict[str, str]] = {"entries": {}}
 
     def record(key: str, source: str, rel_out: str) -> None:
         manifest["entries"][key] = {"source": source, "path": rel_out}
 
-    # 1. Sync local maps
+    # 1. Sync local maps & standalone catalogs
     if args.original_client.is_dir():
         map_count = sync_local_maps(args.original_client, maps_out)
         print(f"[maps] synced {map_count} local map/catalog files", flush=True)
+    cat_count = sync_catalogs(repo_root, args.original_client, catalogs_out)
+    print(f"[catalogs] synced {cat_count} catalog files -> {catalogs_out}", flush=True)
 
-    # 2. Collect desired Daoist PNGs and fetch concurrently
+    # 2. Collect desired Daoist PNGs (core + maps + item icons) and fetch concurrently
     jobs: List[Tuple[str, str]] = []
     if args.remake_dir is not None or not args.skip_remote:
         for key, rel_src in CORE_DAOIST_ASSETS.items():
@@ -236,20 +291,38 @@ def main() -> int:
             rm = json.loads(rm_bytes.decode("utf-8"))
             wanted = {f.strip().lower() for f in args.families.split(",") if f.strip()}
             all_fams = "all" in wanted
-            for m_path in rm.get("manifests", []):
-                parts = m_path.split("/")
-                fam = parts[2].lower() if len(parts) >= 3 else ""
-                if not all_fams and fam not in wanted:
-                    continue
-                fam_bytes = fetch_remake_bytes(m_path, args.remake_dir)
-                if not fam_bytes:
-                    continue
-                fam_json = json.loads(fam_bytes.decode("utf-8"))
-                for piece in fam_json.get("pieces", []):
-                    eid = piece.get("elementId")
-                    pfile = piece.get("file")
-                    if eid is not None and pfile:
-                        jobs.append((f"maps/elem_{eid}", pfile))
+            selected_manifests = [
+                m_path for m_path in rm.get("manifests", [])
+                if all_fams or ((m_path.split("/")[2].lower() if len(m_path.split("/")) >= 3 else "") in wanted)
+            ]
+            with ThreadPoolExecutor(max_workers=10) as mpool:
+                for fam_bytes in mpool.map(lambda p: fetch_remake_bytes(p, args.remake_dir), selected_manifests):
+                    if not fam_bytes:
+                        continue
+                    fam_json = json.loads(fam_bytes.decode("utf-8"))
+                    for piece in fam_json.get("pieces", []):
+                        eid = piece.get("elementId")
+                        pfile = piece.get("file")
+                        if eid is not None and pfile:
+                            jobs.append((f"maps/elem_{eid}", pfile))
+
+        if not args.no_icons:
+            art_json_bytes = fetch_remake_bytes("assets/items/art.json", args.remake_dir)
+            if art_json_bytes:
+                try:
+                    art_doc = json.loads(art_json_bytes.decode("utf-8"))
+                    icon_added = 0
+                    for it in art_doc.get("items", []):
+                        iid = it.get("itemId")
+                        ifile = it.get("file")
+                        if iid is None or not ifile:
+                            continue
+                        jobs.append((f"items/item_{iid}", ifile))
+                        icon_added += 1
+                        if args.max_icons > 0 and icon_added >= args.max_icons:
+                            break
+                except Exception:
+                    pass
 
         def fetch_one(item: Tuple[str, str]) -> Tuple[str, bool, bool]:
             key, rel_src = item
@@ -276,6 +349,32 @@ def main() -> int:
                     else:
                         cached_count += 1
         print(f"[daoist] ready={new_count + cached_count} (downloaded={new_count}, cached={cached_count})", flush=True)
+
+        # 2b. Fetch Daoist WAV audio clips (BGM + SFX)
+        if not args.no_audio:
+            def fetch_audio(clip_name: str) -> Tuple[str, bool, bool]:
+                dst = audio_dir / f"{clip_name}.wav"
+                if dst.is_file():
+                    return clip_name, True, False
+                blob = fetch_remake_bytes(f"assets/audio/original-v1/{clip_name}.wav", args.remake_dir)
+                if not blob:
+                    return clip_name, False, False
+                dst.write_bytes(blob)
+                return clip_name, True, True
+
+            a_new = 0
+            a_cached = 0
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futs = [pool.submit(fetch_audio, c) for c in DAOIST_AUDIO_CLIPS]
+                for fut in as_completed(futs):
+                    cname, ok, downloaded = fut.result()
+                    if ok:
+                        record(f"audio/{cname}", "daoist", f"audio/{cname}.wav")
+                        if downloaded:
+                            a_new += 1
+                        else:
+                            a_cached += 1
+            print(f"[audio] ready={a_new + a_cached}/{len(DAOIST_AUDIO_CLIPS)} (downloaded={a_new}, cached={a_cached})", flush=True)
 
     # 3. Original DIMG fallback from local effect/*.img and data/object.pkg
     if args.original_client.is_dir():

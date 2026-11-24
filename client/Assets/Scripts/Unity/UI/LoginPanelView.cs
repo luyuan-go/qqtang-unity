@@ -30,13 +30,26 @@ namespace Qqtang.UnityClient.UI
             card.anchorMin = new Vector2(0.5f, 0.5f);
             card.anchorMax = new Vector2(0.5f, 0.5f);
             card.pivot = new Vector2(0.5f, 0.5f);
-            card.sizeDelta = new Vector2(680f, 560f);
-            UiFactory.AddVLayout(card.gameObject, 12f, 28, 22);
+            card.sizeDelta = new Vector2(690f, 610f);
+            UiFactory.AddVLayout(card.gameObject, 10f, 28, 18);
 
-            // Header banner
-            var title = UiFactory.CreateText(card, "灵葫大作战 · QQTang Unity 3D", 28, UiFactory.AccentGold, TextAnchor.MiddleCenter, FontStyle.Bold);
-            UiFactory.SetLayout(title.gameObject, prefH: 40f);
-            var sub = UiFactory.CreateText(card, "原生 QQTAUTH1 + QQ-TEA + QQTPPP UDP 协议直连 Go 服务端（道风重制 / 原版兜底双轨美术）", 13, UiFactory.TextSubtle, TextAnchor.MiddleCenter);
+            // Header banner (Daoist logo sprite if cached, plus subtitle)
+            var logoSprite = _ctx.Art.GetLogoSprite();
+            if (logoSprite != null)
+            {
+                var logoGo = new GameObject("DaoistLogo", typeof(RectTransform), typeof(Image));
+                logoGo.transform.SetParent(card, false);
+                var lImg = logoGo.GetComponent<Image>();
+                lImg.sprite = logoSprite;
+                lImg.preserveAspect = true;
+                UiFactory.SetLayout(logoGo, prefH: 64f);
+            }
+            else
+            {
+                var title = UiFactory.CreateText(card, "灵葫大作战 · QQTang Unity 3D", 28, UiFactory.AccentGold, TextAnchor.MiddleCenter, FontStyle.Bold);
+                UiFactory.SetLayout(title.gameObject, prefH: 40f);
+            }
+            var sub = UiFactory.CreateText(card, "原生 QQTAUTH1 + QQ-TEA + QQTPPP UDP 直连 Go 服务端 | 也支持零服务端单机离线演武", 13, UiFactory.TextSubtle, TextAnchor.MiddleCenter);
             UiFactory.SetLayout(sub.gameObject, prefH: 22f);
 
             // Server row
@@ -108,9 +121,16 @@ namespace Qqtang.UnityClient.UI
             }
             SelectRole(1);
 
-            // Login button
-            _loginBtn = UiFactory.CreateButton(card, "登录进入灵葫堂", TriggerLogin, UiFactory.AccentVermilion, fontSize: 18, height: 46f);
-            UiFactory.SetLayout(_loginBtn.gameObject, flexW: 1f, prefH: 46f);
+            // Login + Offline Solo Practice buttons
+            var actionRow = UiFactory.CreateEmpty(card, "LoginActions");
+            UiFactory.AddHLayout(actionRow.gameObject, 10f, 0, 0);
+            UiFactory.SetLayout(actionRow.gameObject, prefH: 46f);
+            _loginBtn = UiFactory.CreateButton(actionRow, "联机登录灵葫堂", TriggerLogin, UiFactory.AccentVermilion, fontSize: 17, height: 46f);
+            UiFactory.SetLayout(_loginBtn.gameObject, flexW: 1.4f, prefH: 46f);
+            var solo1Btn = UiFactory.CreateButton(actionRow, "离线 1v1 演武", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 1), UiFactory.AccentCeladon, fontSize: 14, width: 132f, height: 46f);
+            var solo3Btn = UiFactory.CreateButton(actionRow, "离线 1v3 混战", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 3), UiFactory.AccentGold, UiFactory.TextInk, fontSize: 14, width: 132f, height: 46f);
+            _ = solo1Btn;
+            _ = solo3Btn;
 
             // Status bar
             _statusText = UiFactory.CreateText(card, "请先启动本地 Go 服务端 (tools/start-local-server.ps1)，再点击登录。", 13, UiFactory.TextSubtle, TextAnchor.MiddleCenter);

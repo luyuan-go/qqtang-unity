@@ -26,9 +26,16 @@ namespace Qqtang.UnityClient
         private CellCollision[] _lastCellStates;
 
         private readonly Dictionary<ushort, ActorVisual> _actorVisuals = new Dictionary<ushort, ActorVisual>();
+        private readonly Dictionary<ushort, BossVisual> _bossVisuals = new Dictionary<ushort, BossVisual>();
         private readonly List<GameObject> _pooledBombs = new List<GameObject>();
         private readonly List<GameObject> _pooledFlames = new List<GameObject>();
         private readonly List<GameObject> _pooledPickups = new List<GameObject>();
+
+        private Vector3 _baseCameraPos;
+        private Vector3 _cameraLookTarget;
+        private float _shakeTimer;
+        private float _shakeIntensity;
+        public float CameraZoom { get; set; } = 1.0f;
 
         private sealed class ActorVisual
         {
@@ -38,9 +45,22 @@ namespace Qqtang.UnityClient
             public GameObject TrappedBubble;
             public GameObject ShieldAura;
             public GameObject EmoteBadge;
+            public GameObject BunHalo;
             public GameObject TeamRing;
             public BattleDirection LastDir = BattleDirection.None;
             public byte RoleId;
+        }
+
+        private sealed class BossVisual
+        {
+            public GameObject Root;
+            public Transform HpFill;
+        }
+
+        public void TriggerShake(float intensity = 0.16f, float duration = 0.18f)
+        {
+            _shakeIntensity = Mathf.Max(_shakeIntensity, intensity);
+            _shakeTimer = Mathf.Max(_shakeTimer, duration);
         }
 
         public void Initialize(ArtAssetResolver art)
@@ -91,8 +111,9 @@ namespace Qqtang.UnityClient
             // Position 3D camera at classic angled top-down perspective over the board
             float cx = (_width - 1) * 0.5f * TileSize;
             float cz = -(_height - 1) * 0.5f * TileSize;
-            _camera.transform.position = new Vector3(cx, Mathf.Max(_width, _height) * 1.18f, cz - _height * 0.62f);
-            _camera.transform.LookAt(new Vector3(cx, 0f, cz - 0.35f));
+            _cameraLookTarget = new Vector3(cx, 0f, cz - 0.35f);
+            _baseCameraPos = new Vector3(cx, Mathf.Max(_width, _height) * 1.18f, cz - _height * 0.62f);
+            ApplyCameraTransform();
 
             Shader litShader = Shader.Find("Standard") ?? Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Sprites/Default");
 
@@ -227,6 +248,18 @@ namespace Qqtang.UnityClient
             emote.AddComponent<BillboardSprite>();
             emote.SetActive(false);
 
+            // Bun carrier halo (for Capture-the-Bun objective maps)
+            var bun = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            bun.name = "BunHalo";
+            bun.transform.SetParent(root.transform, false);
+            bun.transform.localPosition = new Vector3(0f, 1.38f, 0f);
+            bun.transform.localScale = new Vector3(0.45f, 0.38f, 0.45f);
+            Destroy(bun.GetComponent<Collider>());
+            var bunMat = new Material(Shader.Find("Standard") ?? Shader.Find("Sprites/Default"));
+            bunMat.color = new Color(0.98f, 0.86f, 0.45f, 1f);
+            bun.GetComponent<MeshRenderer>().sharedMaterial = bunMat;
+            bun.SetActive(false);
+
             return new ActorVisual
             {
                 Root = root,
@@ -235,9 +268,71 @@ namespace Qqtang.UnityClient
                 TrappedBubble = trap,
                 ShieldAura = shield,
                 EmoteBadge = emote,
+                BunHalo = bun,
                 TeamRing = ring,
                 RoleId = actor.RoleId
             };
+        }
+
+        private BossVisual CreateBossVisual(BattleBossEntity boss)
+        {
+            var root = new GameObject($"Boss_{boss.BossId}");
+            root.transform.SetParent(_dynamicRoot, false);
+
+            var ring = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+            ring.transform.SetParent(root.transform, false);
+            ring.transform.localPosition = new Vector3(0f, 0.04f, 0f);
+            ring.transform.localScale = new Vector3(1.1f, 0.03f, 1.1f);
+            Destroy(ring.GetComponent<Collider>());
+            var rMat = new Material(Shader.Find("Standard") ?? Shader.Find("Sprites/Default"));
+            rMat.color = new Color(0.88f, 0.18f, 0.16f, 1f);
+            ring.GetComponent<MeshRenderer>().sharedMaterial = rMat;
+
+            var spObj = new GameObject("BossSprite");
+            spObj.transform.SetParent(root.transform, false);
+            spObj.transform.localPosition = new Vector3(0f, 0.12f, 0f);
+            spObj.transform.localScale = new Vector3(1.55f, 1.55f, 1.55f);
+            var sr = spObj.AddComponent<SpriteRenderer>();
+            sr.sprite = _art.GetCharacterSprite(boss.RoleId, "S", new Color(0.92f, 0.25f, 0.22f));
+            sr.color = new Color(1f, 0.85f, 0.85f, 1f);
+            sr.sortingOrder = 12;
+            spObj.AddComponent<BillboardSprite>();
+
+            // Floating HP bar
+            var hpBg = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            hpBg.transform.SetParent(root.transform, false);
+            hpBg.transform.localPosition = new Vector3(0f, 1.72f, 0f);
+            hpBg.transform.localScale = new Vector3(1.1f, 0.11f, 0.06f);
+            Destroy(hpBg.GetComponent<Collider>());
+            var bgMat = new Material(Shader.Find("Sprites/Default"));
+            bgMat.color = new Color(0.12f, 0.12f, 0.14f, 0.9f);
+            hpBg.GetComponent<MeshRenderer>().sharedMaterial = bgMat;
+
+            var hpFill = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            hpFill.transform.SetParent(root.transform, false);
+            hpFill.transform.localPosition = new Vector3(0f, 1.72f, -0.04f);
+            hpFill.transform.localScale = new Vector3(1.04f, 0.08f, 0.06f);
+            Destroy(hpFill.GetComponent<Collider>());
+            var fMat = new Material(Shader.Find("Sprites/Default"));
+            fMat.color = new Color(0.92f, 0.22f, 0.20f, 1f);
+            hpFill.GetComponent<MeshRenderer>().sharedMaterial = fMat;
+
+            return new BossVisual { Root = root, HpFill = hpFill.transform };
+        }
+
+        private void ApplyCameraTransform()
+        {
+            if (_camera == null) return;
+            Vector3 offset = (_baseCameraPos - _cameraLookTarget) * Mathf.Clamp(CameraZoom, 0.7f, 1.35f);
+            Vector3 pos = _cameraLookTarget + offset;
+            if (_shakeTimer > 0f)
+            {
+                _shakeTimer -= Time.deltaTime;
+                pos += UnityEngine.Random.insideUnitSphere * _shakeIntensity;
+                if (_shakeTimer <= 0f) _shakeIntensity = 0f;
+            }
+            _camera.transform.position = pos;
+            _camera.transform.LookAt(_cameraLookTarget);
         }
 
         public void SyncView(Rule1BattleSimulation sim)
@@ -298,6 +393,8 @@ namespace Qqtang.UnityClient
                     vis.ShieldAura.SetActive(actor.IsInvulnerable(sim.ElapsedMs));
                 if (vis.EmoteBadge != null)
                     vis.EmoteBadge.SetActive(actor.ActiveEmotionId != 0 && sim.ElapsedMs < actor.EmotionExpireAtMs);
+                if (vis.BunHalo != null)
+                    vis.BunHalo.SetActive(sim.BunCarrierPlayerId == actor.PlayerId);
                 if (vis.SpriteTransform != null)
                 {
                     float walkBob = actor.Moving ? Mathf.Abs(Mathf.Sin(Time.time * 12f)) * 0.10f : 0f;
@@ -357,6 +454,24 @@ namespace Qqtang.UnityClient
                 sr.sprite = _art.GetSprite($"pickups/scene_{p.SceneId}", PickupColor(p.SceneId), circleMask: true);
             }
             for (int i = pIdx; i < _pooledPickups.Count; i++) _pooledPickups[i].SetActive(false);
+
+            // 6. Sync Boss / PVE NPC entities
+            foreach (var boss in sim.Bosses)
+            {
+                if (!_bossVisuals.TryGetValue(boss.BossId, out var bVis))
+                {
+                    bVis = CreateBossVisual(boss);
+                    _bossVisuals[boss.BossId] = bVis;
+                }
+                bVis.Root.SetActive(boss.Alive);
+                if (!boss.Alive) continue;
+                float bob = 0.08f * Mathf.Sin(Time.time * 3.5f + boss.BossId);
+                bVis.Root.transform.position = PixelToWorld(boss.PosX, boss.PosY, bob);
+                float ratio = boss.MaxHp > 0 ? Mathf.Clamp01((float)boss.Hp / boss.MaxHp) : 0f;
+                bVis.HpFill.localScale = new Vector3(1.04f * ratio, 0.08f, 0.06f);
+            }
+
+            ApplyCameraTransform();
         }
 
         private GameObject CreateBillboardEntity(string name, string artKey, Color fallbackColor, float scale, int sortingOrder)
@@ -385,6 +500,7 @@ namespace Qqtang.UnityClient
                 _dynamicRoot = null;
             }
             _actorVisuals.Clear();
+            _bossVisuals.Clear();
             _pooledBombs.Clear();
             _pooledFlames.Clear();
             _pooledPickups.Clear();

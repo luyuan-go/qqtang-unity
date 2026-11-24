@@ -55,6 +55,14 @@ namespace Qqtang.UnityClient.UI
         private ushort _pendingPasswordRoomId;
         private string _pendingPasswordRoomName;
 
+        private readonly RectTransform _settingsModal;
+        private readonly Slider _masterSlider;
+        private readonly Slider _bgmSlider;
+        private readonly Slider _sfxSlider;
+        private readonly Slider _zoomSlider;
+        private readonly Toggle _muteToggle;
+        private readonly Text _artStatsText;
+
         public Action<MainTab> OnTabSelected;
 
         public LobbyAndNavView(Transform parent, UiContext ctx)
@@ -90,7 +98,8 @@ namespace Qqtang.UnityClient.UI
             _moneyText = UiFactory.CreateText(topBar, "糖币: 0", 14, UiFactory.AccentGold, TextAnchor.MiddleRight, FontStyle.Bold);
             UiFactory.SetLayout(_moneyText.gameObject, prefW: 120f, prefH: 42f);
 
-            UiFactory.CreateButton(topBar, "注销", () => _ctx.App.RequestLogout(), UiFactory.AccentDanger, fontSize: 13, width: 64f, height: 34f);
+            UiFactory.CreateButton(topBar, "设置", OpenSettingsModal, UiFactory.AccentMuted, fontSize: 13, width: 58f, height: 34f);
+            UiFactory.CreateButton(topBar, "注销", () => _ctx.App.RequestLogout(), UiFactory.AccentDanger, fontSize: 13, width: 58f, height: 34f);
 
             // Content area below top bar
             ContentArea = UiFactory.CreateEmpty(ShellRoot, "ContentArea");
@@ -210,6 +219,50 @@ namespace Qqtang.UnityClient.UI
             UiFactory.CreateButton(pmBtns, "取消", () => _pwdModal.gameObject.SetActive(false), UiFactory.AccentMuted, width: 100f, height: 34f);
             UiFactory.CreateButton(pmBtns, "进入", ConfirmPasswordEnter, UiFactory.AccentCeladon, width: 120f, height: 34f);
             _pwdModal.gameObject.SetActive(false);
+
+            // Settings / Audio / Camera / Art Stats / Controls Modal
+            _settingsModal = UiFactory.CreatePanel(ShellRoot, "SettingsModal", UiFactory.BgModalBackdrop);
+            UiFactory.Stretch(_settingsModal);
+            var sCard = UiFactory.CreatePanel(_settingsModal, "Card", UiFactory.BgSlateCard, UiFactory.AccentGold);
+            sCard.anchorMin = sCard.anchorMax = sCard.pivot = new Vector2(0.5f, 0.5f);
+            sCard.sizeDelta = new Vector2(480f, 380f);
+            UiFactory.AddVLayout(sCard.gameObject, 10f, 22, 18);
+
+            var smTitle = UiFactory.CreateText(sCard, "客户端设置 · 音画与操作指南", 18, UiFactory.AccentGold, TextAnchor.MiddleCenter, FontStyle.Bold);
+            UiFactory.SetLayout(smTitle.gameObject, prefH: 28f);
+
+            _masterSlider = UiFactory.CreateSlider(sCard, "主音量", 0f, 1f, 0.85f, _ => PushSettings());
+            _bgmSlider = UiFactory.CreateSlider(sCard, "背景音乐", 0f, 1f, 0.38f, _ => PushSettings());
+            _sfxSlider = UiFactory.CreateSlider(sCard, "音效音量", 0f, 1f, 0.72f, _ => PushSettings());
+            _zoomSlider = UiFactory.CreateSlider(sCard, "镜头缩放", 0.75f, 1.30f, 1.0f, _ => PushSettings());
+            _muteToggle = UiFactory.CreateToggle(sCard, "全局静音 (Mute)", false, _ => PushSettings());
+
+            _artStatsText = UiFactory.CreateText(sCard, "美术资源统计: 统计中...", 12, UiFactory.AccentCeladon);
+            UiFactory.SetLayout(_artStatsText.gameObject, prefH: 22f);
+
+            var guide = UiFactory.CreateText(sCard,
+                "操作键位：WASD/方向键 移动 | Space/J 放泡 | 1 扎针 | 2 护盾 | 3 遥控 | E 表情 | Enter 局内聊天 | Esc 菜单",
+                12, UiFactory.TextSubtle);
+            UiFactory.SetLayout(guide.gameObject, prefH: 38f);
+
+            var smBtns = UiFactory.CreateEmpty(sCard, "Btns");
+            UiFactory.AddHLayout(smBtns.gameObject, 10f, 0, 0, TextAnchor.MiddleCenter);
+            UiFactory.SetLayout(smBtns.gameObject, prefH: 36f);
+            UiFactory.CreateButton(smBtns, "完成并关闭", () => _settingsModal.gameObject.SetActive(false), UiFactory.AccentCeladon, width: 140f, height: 34f);
+            _settingsModal.gameObject.SetActive(false);
+        }
+
+        private void OpenSettingsModal()
+        {
+            var stats = _ctx.Art.GetLoadedSourceStats();
+            _artStatsText.text = $"已加载美术源：道风重制 {stats.daoist} | 原版兜底 {stats.original} | 程序渲染 {stats.procedural}";
+            _settingsModal.gameObject.SetActive(true);
+        }
+
+        private void PushSettings()
+        {
+            if (_masterSlider == null || _bgmSlider == null || _sfxSlider == null || _zoomSlider == null || _muteToggle == null) return;
+            _ctx.App.ApplySettings(_masterSlider.value, _bgmSlider.value, _sfxSlider.value, _muteToggle.isOn, _zoomSlider.value);
         }
 
         private void AddTabButton(Transform parent, MainTab tab, string label)

@@ -28,6 +28,37 @@ namespace Qqtang.UnityClient
         public string GetResolvedSource(string key) =>
             _resolvedSources.TryGetValue(key, out var src) ? src : "procedural";
 
+        public (int daoist, int original, int procedural) GetLoadedSourceStats()
+        {
+            int d = 0, o = 0, p = 0;
+            foreach (var v in _resolvedSources.Values)
+            {
+                if (v == "daoist") d++;
+                else if (v == "original") o++;
+                else p++;
+            }
+            return (d, o, p);
+        }
+
+        public Sprite GetLogoSprite()
+        {
+            string key = "ui/logo";
+            if (_sprites.TryGetValue(key, out var cached)) return cached;
+            string daoistPath = Path.Combine(_cacheRoot, "daoist", "ui", "logo.png");
+            if (!TryLoadPng(daoistPath, out var tex)) return null;
+            _textures[key] = tex;
+            _resolvedSources[key] = "daoist";
+            Sprite sp = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f), 100f);
+            _sprites[key] = sp;
+            return sp;
+        }
+
+        public Sprite GetItemIconSprite(ushort itemId)
+        {
+            Color fallback = Color.HSVToRGB((itemId * 0.137f) % 1f, 0.45f, 0.78f);
+            return GetSprite($"items/item_{itemId}", fallback, circleMask: false);
+        }
+
         public Texture2D GetTexture(string key, Color fallbackColor, bool circleMask = false)
         {
             if (_textures.TryGetValue(key, out var cached)) return cached;

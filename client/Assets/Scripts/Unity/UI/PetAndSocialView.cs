@@ -215,7 +215,17 @@ namespace Qqtang.UnityClient.UI
             UiFactory.CreateButton(loveRow, "保存宣言", () => _ctx.App.RequestModifyLoveWord(_loveWordInput.text.Trim()), UiFactory.AccentCeladon, fontSize: 13, width: 92f, height: 34f);
             UiFactory.CreateButton(loveRow, "解除关系", () => _ctx.App.RequestDivorce(), UiFactory.AccentDanger, fontSize: 13, width: 92f, height: 34f);
 
-            var spLbl = UiFactory.CreateText(_marriagePanel, "收到的求婚申请:", 14, UiFactory.TextLight, FontStyle.Bold);
+            var wedRow = UiFactory.CreateEmpty(_marriagePanel, "WeddingRow");
+            UiFactory.AddHLayout(wedRow.gameObject, 8f, 0, 0);
+            UiFactory.SetLayout(wedRow.gameObject, prefH: 34f);
+            var wLbl = UiFactory.CreateText(wedRow, "婚礼仪式:", 13, UiFactory.AccentGold, FontStyle.Bold);
+            UiFactory.SetLayout(wLbl.gameObject, prefW: 72f, prefH: 30f);
+            UiFactory.CreateButton(wedRow, "发起中式婚礼", () => _ctx.App.RequestStartWedding(1), UiFactory.AccentVermilion, fontSize: 12, width: 108f, height: 30f);
+            UiFactory.CreateButton(wedRow, "发起西式婚礼", () => _ctx.App.RequestStartWedding(0), UiFactory.AccentCeladon, fontSize: 12, width: 108f, height: 30f);
+            UiFactory.CreateButton(wedRow, "切中式礼堂", () => _ctx.App.RequestChangeWeddingMode(1), UiFactory.AccentMuted, fontSize: 12, width: 96f, height: 30f);
+            UiFactory.CreateButton(wedRow, "切西式教堂", () => _ctx.App.RequestChangeWeddingMode(0), UiFactory.AccentMuted, fontSize: 12, width: 96f, height: 30f);
+
+            var spLbl = UiFactory.CreateText(_marriagePanel, "收到的求婚与婚礼邀请:", 14, UiFactory.TextLight, FontStyle.Bold);
             UiFactory.SetLayout(spLbl.gameObject, prefH: 22f);
             var spScroll = UiFactory.CreateScrollView(_marriagePanel, "SparkReqs", out _sparkReqContent, spacing: 4f);
             UiFactory.SetLayout(spScroll.gameObject, flexW: 1f, flexH: 1f);
@@ -392,6 +402,17 @@ namespace Qqtang.UnityClient.UI
                 uint proposer = sp.ProposerUin;
                 UiFactory.CreateButton(row, "答应", () => _ctx.App.RequestAnswerSpark(proposer, true), UiFactory.AccentVermilion, fontSize: 12, width: 64f, height: 26f);
                 UiFactory.CreateButton(row, "婉拒", () => _ctx.App.RequestAnswerSpark(proposer, false), UiFactory.AccentMuted, fontSize: 12, width: 64f, height: 26f);
+            }
+            foreach (var w in s.PendingWeddings)
+            {
+                var row = UiFactory.CreatePanel(_sparkReqContent, $"Wed_{w.ProposerUin}", UiFactory.BgSlateCard, UiFactory.AccentVermilion);
+                UiFactory.SetLayout(row.gameObject, prefH: 38f);
+                UiFactory.AddHLayout(row.gameObject, 6f, 8, 4);
+                var t = UiFactory.CreateText(row, $"[婚礼邀请] {w.Nickname} ({w.ProposerUin}): {w.Word}", 13, UiFactory.AccentGold);
+                UiFactory.SetLayout(t.gameObject, flexW: 1f, prefH: 28f);
+                uint proposer = w.ProposerUin;
+                UiFactory.CreateButton(row, "同意举行婚礼", () => _ctx.App.RequestAnswerWedding(proposer, true), UiFactory.AccentVermilion, fontSize: 12, width: 102f, height: 26f);
+                UiFactory.CreateButton(row, "婉拒", () => _ctx.App.RequestAnswerWedding(proposer, false), UiFactory.AccentMuted, fontSize: 12, width: 58f, height: 26f);
             }
         }
     }

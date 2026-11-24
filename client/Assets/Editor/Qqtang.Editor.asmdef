@@ -1,0 +1,19 @@
+{
+  "name": "Qqtang.Editor",
+  "rootNamespace": "Qqtang.UnityClient.Editor",
+  "references": [
+    "Qqtang.Core",
+    "Qqtang.Unity"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

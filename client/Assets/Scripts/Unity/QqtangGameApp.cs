@@ -67,6 +67,9 @@ namespace Qqtang.UnityClient
 
         // Battle state
         private readonly List<LegacyUdpMulticastTarget> _battlePeers = new List<LegacyUdpMulticastTarget>();
+        private readonly List<(ushort playerId, LocalBattleAiBot bot)> _offlineBots = new List<(ushort, LocalBattleAiBot)>();
+        private bool _isOfflineSolo;
+        private ushort _activeBattleMapId = 201;
         private float _simAccumulatorMs;
         private float _helloTimer;
         private float _lobbyPollTimer;
@@ -155,16 +158,25 @@ namespace Qqtang.UnityClient
         {
             _store.OnToastRequested += ShowToast;
             _store.OnGameBeginReceived += StartBattle;
+            _store.OnNextMapStageReceived += StartBattle;
             _store.OnGameOverReceived += over =>
             {
-                _audio.PlaySfx("victory");
+                PlaySettlementAudio(over, _store.PlayerId);
                 SetScreen(ClientScreenState.Settlement);
-                _battleView.ShowSettlement(over);
+                _battleView.ShowSettlement(over, isOfflineSolo: false);
             };
             _store.OnBattleGameEventReceived += ev =>
             {
                 if (_sim != null) _sim.ApplyRemoteMessage(0, ev.Schema, ev.Body);
             };
+        }
+
+        private void PlaySettlementAudio(GameOverData over, ushort localPid)
+        {
+            var res = over?.Results.Find(r => r.PlayerId == localPid);
+            if (res == null || res.Result == GameResultCode.Win) _audio.PlaySfx("victory");
+            else if (res.Result == GameResultCode.Draw) _audio.PlaySfx("draw");
+            else _audio.PlaySfx("defeat");
         }
 
         private void SetScreen(ClientScreenState screen)
@@ -175,6 +187,15 @@ namespace Qqtang.UnityClient
             _roomView.SetVisible(screen == ClientScreenState.Room);
             _battleView.SetHudVisible(screen == ClientScreenState.Battle);
             if (screen != ClientScreenState.Settlement) _battleView.HideSettlement();
+
+            if (screen == ClientScreenState.Battle)
+            {
+                _audio.PlayBgm("music-battle");
+            }
+            else if (screen == ClientScreenState.MainShell || screen == ClientScreenState.Room || screen == ClientScreenState.Login)
+            {
+                _audio.PlayBgm("music-lobby");
+            }
 
             if (screen == ClientScreenState.MainShell)
             {
@@ -263,6 +284,8 @@ namespace Qqtang.UnityClient
 
         private void RefreshVisibleScreen()
         {
+            if (_store.ActiveTreasureRoom == null && _battleView.TreasureModal.gameObject.activeSelf)
+                _battleView.HideTreasureRoom();
             if (_screen == ClientScreenState.MainShell)
             {
                 _lobbyView.Refresh();
@@ -300,12 +323,14 @@ namespace Qqtang.UnityClient
         {
             if (Input.GetKeyDown(KeyCode.Escape))
                 _battleView.TogglePause();
+            if (!_isOfflineSolo && Input.GetKeyDown(KeyCode.Return))
+                _battleView.ToggleBattleChat();
 
-            bool pauseOpen = _battleView.IsPauseOpen;
-            BattleDirection moveInput = pauseOpen ? BattleDirection.None : ReadMoveInput();
-            bool bombPressed = !pauseOpen && (Input.GetKeyDown(KeyCode.Space) || Input.GetKeyDown(KeyCode.J));
+            bool blockControls = _battleView.IsPauseOpen || _battleView.IsChatInputFocused;
+            BattleDirection moveInput = blockControls ? BattleDirection.None : ReadMoveInput();
+            bool bombPressed = !blockControls && (Input.GetKeyDown(KeyCode.Space) || Input.GetKeyDown(KeyCode.J));
 
-            if (!pauseOpen)
+            if (!blockControls)
             {
                 if (Input.GetKeyDown(KeyCode.Alpha1)) TriggerBattleWorldItem(63);
                 if (Input.GetKeyDown(KeyCode.Alpha2)) TriggerBattleWorldItem(41);
@@ -321,15 +346,50 @@ namespace Qqtang.UnityClient
                 _simAccumulatorMs -= fixedStepMs;
                 int prevBombs = _sim.Bombs.Count;
                 int prevFlames = _sim.Flames.Count;
+                int prevConsumed = CountConsumedPickups(_sim);
+                var prevLocalState = _sim.LocalActor != null ? _sim.LocalActor.State : ActorLifeState.Dead;
+
+                if (_isOfflineSolo)
+                {
+                    foreach (var entry in _offlineBots)
+                    {
+                        var (bMove, bBomb) = entry.bot.Decide(_sim);
+                        _sim.StepOfflineBot(entry.playerId, fixedStepMs, bMove, bBomb);
+                    }
+                }
                 _sim.Step(fixedStepMs, moveInput, bombQueued);
-                if (_sim.Bombs.Count > prevBombs) _audio.PlaySfx("bomb_place", 0.5f);
-                if (_sim.Flames.Count > prevFlames) _audio.PlaySfx("explode", 0.65f);
+
+                if (_sim.Bombs.Count > prevBombs) _audio.PlaySfx("bubble-place", 0.55f);
+                if (_sim.Flames.Count > prevFlames)
+                {
+                    _audio.PlaySfx("bubble-burst", 0.7f);
+                    _arenaView.TriggerShake(0.14f, 0.16f);
+                }
+                if (CountConsumedPickups(_sim) > prevConsumed) _audio.PlaySfx("pickup", 0.65f);
+                if (_sim.LocalActor != null && prevLocalState == ActorLifeState.Active && _sim.LocalActor.State == ActorLifeState.Trapped)
+                    _audio.PlaySfx("trapped", 0.75f);
+
                 bombQueued = false;
-                FlushOutgoingBattleEvents();
+                if (!_isOfflineSolo) FlushOutgoingBattleEvents();
+
+                if (_isOfflineSolo && _sim.IsFinished && _sim.OfflineSettlement != null)
+                {
+                    PlaySettlementAudio(_sim.OfflineSettlement, 1);
+                    SetScreen(ClientScreenState.Settlement);
+                    _battleView.ShowSettlement(_sim.OfflineSettlement, isOfflineSolo: true);
+                    return;
+                }
             }
 
             _arenaView.SyncView(_sim);
-            _battleView.UpdateHud(_sim, _store.MapId);
+            _battleView.UpdateHud(_sim, _activeBattleMapId);
+        }
+
+        private static int CountConsumedPickups(Rule1BattleSimulation sim)
+        {
+            int c = 0;
+            for (int i = 0; i < sim.Pickups.Count; i++) if (sim.Pickups[i].Consumed) c++;
+            return c;
         }
 
         private static BattleDirection ReadMoveInput()
@@ -360,6 +420,9 @@ namespace Qqtang.UnityClient
 
         private void StartBattle(GameBeginData begin)
         {
+            _isOfflineSolo = false;
+            _offlineBots.Clear();
+            _activeBattleMapId = (ushort)begin.MapId;
             _battlePeers.Clear();
             foreach (var member in _store.RoomMembers)
             {
@@ -380,6 +443,59 @@ namespace Qqtang.UnityClient
             _arenaView.BuildArena(_sim);
             SetScreen(ClientScreenState.Battle);
             ShowToast($"对局开始！地图: {_catalogs.GetMapName((ushort)begin.MapId)}");
+        }
+
+        public void StartOfflineSoloMatch(byte playerRoleId, int botCount)
+        {
+            _audio.PlaySfx("ui-click", 0.6f);
+            _isOfflineSolo = true;
+            _battlePeers.Clear();
+            _offlineBots.Clear();
+            _activeBattleMapId = 201;
+
+            int bots = Mathf.Clamp(botCount, 1, 3);
+            int seed = Environment.TickCount;
+            var begin = new GameBeginData
+            {
+                GameId = (uint)(seed & 0x7FFFFFFF),
+                MapId = _activeBattleMapId,
+                SpawnSeed = (uint)seed,
+                ItemSeed = (uint)(seed ^ 0x5A5A5A5A),
+                GameTimeMs = 180_000,
+                ArbitratorPlayerId = 1
+            };
+            begin.Items.Add(new GameItemTypeData { ItemId = 1, Quantity = 6 });  // bomb capacity
+            begin.Items.Add(new GameItemTypeData { ItemId = 2, Quantity = 6 });  // bomb power
+            begin.Items.Add(new GameItemTypeData { ItemId = 3, Quantity = 4 });  // speed
+            begin.Items.Add(new GameItemTypeData { ItemId = 63, Quantity = 2 }); // needle
+            begin.Items.Add(new GameItemTypeData { ItemId = 41, Quantity = 2 }); // shield
+            begin.Players.Add(new PlayerGameInfoData { PlayerId = 1, RoleId = playerRoleId, TeamId = 1 });
+            for (int i = 0; i < bots; i++)
+            {
+                ushort botPid = (ushort)(i + 2);
+                byte botRole = (byte)((playerRoleId + i) % 4 + 1);
+                begin.Players.Add(new PlayerGameInfoData { PlayerId = botPid, RoleId = botRole, TeamId = (byte)(i + 2) });
+                _offlineBots.Add((botPid, new LocalBattleAiBot(botPid, seed + i * 31)));
+            }
+
+            LoadedMapData map = LoadBattleMap(_activeBattleMapId);
+            _sim = new Rule1BattleSimulation { IsOfflineSoloMode = true };
+            _sim.Initialize(begin, map, localPlayerId: 1, usesFreeRule: false);
+            _simAccumulatorMs = 0f;
+
+            _arenaView.BuildArena(_sim);
+            SetScreen(ClientScreenState.Battle);
+            ShowToast($"离线演武开始（1v{bots} AI），无需启动服务端！");
+        }
+
+        public void ApplySettings(float master, float bgm, float sfx, bool muted, float zoom)
+        {
+            _audio.MasterVolume = master;
+            _audio.BgmVolume = bgm;
+            _audio.SfxVolume = sfx;
+            _audio.Muted = muted;
+            _audio.ApplyVolumeSettings();
+            _arenaView.CameraZoom = zoom;
         }
 
         private LoadedMapData LoadBattleMap(uint mapId)
@@ -409,20 +525,36 @@ namespace Qqtang.UnityClient
         {
             if (_sim == null) return;
             if (_sim.TryUseWorldItem(itemId))
-                FlushOutgoingBattleEvents();
+            {
+                if (itemId == 63) _audio.PlaySfx("needle", 0.75f);
+                else if (itemId == 41 || itemId == 42 || itemId == 43) _audio.PlaySfx("shield", 0.75f);
+                else _audio.PlaySfx("ui-click", 0.6f);
+                if (!_isOfflineSolo) FlushOutgoingBattleEvents();
+            }
             else
+            {
                 ShowToast(itemId == 63 ? "需要被困且持有针才能自救" : "当前无法使用该局内道具");
+            }
         }
 
         public void TriggerBattleEmotion(uint emotionId)
         {
             if (_sim == null) return;
-            _sim.TriggerLocalEmotion(_store.Uin, emotionId);
-            FlushOutgoingBattleEvents();
+            _sim.TriggerLocalEmotion(_isOfflineSolo ? 0u : _store.Uin, emotionId);
+            if (!_isOfflineSolo) FlushOutgoingBattleEvents();
         }
 
         public void ReturnToRoomAfterSettlement()
         {
+            _audio.PlaySfx("ui-click", 0.5f);
+            if (_isOfflineSolo)
+            {
+                _isOfflineSolo = false;
+                _offlineBots.Clear();
+                _sim = null;
+                SetScreen(ClientScreenState.Login);
+                return;
+            }
             _store.ExitBattleToRoom();
             SetScreen(_store.InRoom ? ClientScreenState.Room : ClientScreenState.MainShell);
         }
@@ -525,6 +657,14 @@ namespace Qqtang.UnityClient
 
         public async void RequestLeaveRoom()
         {
+            if (_isOfflineSolo)
+            {
+                _isOfflineSolo = false;
+                _offlineBots.Clear();
+                _sim = null;
+                SetScreen(ClientScreenState.Login);
+                return;
+            }
             await RunSafeAsync(async () =>
             {
                 if (_store.InRoom) await _session.LeaveRoomAsync(_store.RoomId);
@@ -827,6 +967,15 @@ namespace Qqtang.UnityClient
             {
                 await _session.AnswerKinInviteAsync(inviterUin, kinIndex, accepted);
                 _store.PendingKinInvites.RemoveAll(x => x.KinIndex == kinIndex && x.InviterUin == inviterUin);
+                if (accepted && kinIndex > 0)
+                {
+                    await Task.Delay(120);
+                    var kb = await _session.FetchKinBaseAsync(kinIndex);
+                    _store.ApplyKinBase(kb);
+                    var km = await _session.FetchKinMembersAsync(kinIndex, kb.ListUpdate);
+                    _store.ApplyKinMembers(km);
+                    ShowToast($"已加入家族 [{kb.Name}]！");
+                }
                 _socialView.RefreshSocial();
             });
         }
@@ -932,6 +1081,102 @@ namespace Qqtang.UnityClient
                     _store.ApplyMarriageInfo(null);
                     ShowToast("已解除伴侣关系");
                 }
+            });
+        }
+
+        public async void RequestStartWedding(ushort weddingModeId)
+        {
+            await RunSafeAsync(async () =>
+            {
+                if (_store.Marriage == null || !_store.Marriage.IsMarried) { ShowToast("需先结为道侣再发起婚礼"); return; }
+                var res = await _session.StartWeddingAsync(_store.Marriage.MarriageUin, weddingModeId);
+                ShowToast(res.Result == 0
+                    ? $"已向 {_store.Marriage.SpouseNickname} 发起{(weddingModeId == 1 ? "中式" : "西式")}婚礼！"
+                    : $"发起婚礼失败 (code={res.Result}): {res.Word}");
+            });
+        }
+
+        public async void RequestAnswerWedding(uint proposerUin, bool accepted)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.AnswerWeddingAsync(proposerUin, accepted);
+                _store.PendingWeddings.RemoveAll(w => w.ProposerUin == proposerUin);
+                _socialView.RefreshSocial();
+                ShowToast(res.Result == 0
+                    ? (accepted ? "婚礼礼成！百年好合！" : "已婉拒婚礼邀请")
+                    : $"婚礼回应失败 (code={res.Result}): {res.Word}");
+            });
+        }
+
+        public async void RequestChangeWeddingMode(ushort weddingModeId)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.ChangeWeddingModeAsync(weddingModeId);
+                ShowToast(res.Result == 0
+                    ? $"婚礼礼堂已切换为{(weddingModeId == 1 ? "中式礼堂" : "西式教堂")}"
+                    : $"切换礼堂失败 (code={res.Result}): {res.Word}");
+            });
+        }
+
+        public async void RequestUseItemInRoom(ushort itemId)
+        {
+            await RunSafeAsync(async () =>
+            {
+                if (!_store.InRoom) { ShowToast("仅可在房间内使用该道具"); return; }
+                ushort res = await _session.UseItemInRoomAsync(_store.RoomId, itemId);
+                ShowToast(res == 0 ? $"已在房间中使用 {_catalogs.GetItemName(itemId)}" : $"使用失败 (code=0x{res:X4})");
+            });
+        }
+
+        public async void RequestEnterTreasureRoom()
+        {
+            await RunSafeAsync(async () =>
+            {
+                var resp = await _session.EnterTreasureRoomAsync();
+                if (resp.ResultId == 0)
+                {
+                    _store.ActiveTreasureRoom = resp;
+                    _battleView.ShowTreasureRoom(resp);
+                    _audio.PlaySfx("pickup", 0.7f);
+                }
+                else
+                {
+                    ShowToast($"当前未触发藏宝室资格 (code={resp.ResultId})");
+                }
+            });
+        }
+
+        public async void RequestGetTreasureItem(uint itemId)
+        {
+            await RunSafeAsync(async () =>
+            {
+                ushort res = await _session.GetTreasureItemAsync(itemId);
+                if (res == 0)
+                {
+                    _audio.PlaySfx("pickup", 0.8f);
+                    if (_store.ActiveTreasureRoom != null)
+                    {
+                        _store.ActiveTreasureRoom.Items.RemoveAll(it => it.ItemId == itemId);
+                        _battleView.ShowTreasureRoom(_store.ActiveTreasureRoom);
+                    }
+                    ShowToast($"已拾取藏宝室道具 #{itemId} ({_catalogs.GetItemName((ushort)itemId)})");
+                }
+                else
+                {
+                    ShowToast($"拾取失败 (code={res})");
+                }
+            });
+        }
+
+        public async void RequestLeaveTreasureRoom()
+        {
+            await RunSafeAsync(async () =>
+            {
+                await _session.LeaveTreasureRoomAsync();
+                _store.ActiveTreasureRoom = null;
+                _battleView.HideTreasureRoom();
             });
         }
 
