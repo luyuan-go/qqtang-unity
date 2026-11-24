@@ -332,9 +332,12 @@ namespace Qqtang.UnityClient
 
             if (!blockControls)
             {
-                if (Input.GetKeyDown(KeyCode.Alpha1)) TriggerBattleWorldItem(63);
-                if (Input.GetKeyDown(KeyCode.Alpha2)) TriggerBattleWorldItem(41);
-                if (Input.GetKeyDown(KeyCode.Alpha3)) TriggerBattleWorldItem(64);
+                if (Input.GetKeyDown(KeyCode.Alpha1)) TriggerBattleWorldItem(63); // Needle
+                if (Input.GetKeyDown(KeyCode.Alpha2)) TriggerBattleWorldItem(41); // Trap
+                if (Input.GetKeyDown(KeyCode.Alpha3)) TriggerBattleWorldItem(42); // Banana Peel
+                if (Input.GetKeyDown(KeyCode.Alpha4)) TriggerBattleWorldItem(43); // Slow Glue
+                if (Input.GetKeyDown(KeyCode.Alpha5)) TriggerBattleProjectileItem(); // Dart (44) or Axe (46)
+                if (Input.GetKeyDown(KeyCode.Alpha6)) TriggerBattleWorldItem(64); // Remote Detonator
                 if (Input.GetKeyDown(KeyCode.E)) TriggerBattleEmotion(1);
             }
 
@@ -344,11 +347,6 @@ namespace Qqtang.UnityClient
             while (_simAccumulatorMs >= fixedStepMs)
             {
                 _simAccumulatorMs -= fixedStepMs;
-                int prevBombs = _sim.Bombs.Count;
-                int prevFlames = _sim.Flames.Count;
-                int prevConsumed = CountConsumedPickups(_sim);
-                var prevLocalState = _sim.LocalActor != null ? _sim.LocalActor.State : ActorLifeState.Dead;
-
                 if (_isOfflineSolo)
                 {
                     foreach (var entry in _offlineBots)
@@ -359,15 +357,7 @@ namespace Qqtang.UnityClient
                 }
                 _sim.Step(fixedStepMs, moveInput, bombQueued);
 
-                if (_sim.Bombs.Count > prevBombs) _audio.PlaySfx("bubble-place", 0.55f);
-                if (_sim.Flames.Count > prevFlames)
-                {
-                    _audio.PlaySfx("bubble-burst", 0.7f);
-                    _arenaView.TriggerShake(0.14f, 0.16f);
-                }
-                if (CountConsumedPickups(_sim) > prevConsumed) _audio.PlaySfx("pickup", 0.65f);
-                if (_sim.LocalActor != null && prevLocalState == ActorLifeState.Active && _sim.LocalActor.State == ActorLifeState.Trapped)
-                    _audio.PlaySfx("trapped", 0.75f);
+                PlayBattleAudioCues(_sim.StepAudioCues);
 
                 bombQueued = false;
                 if (!_isOfflineSolo) FlushOutgoingBattleEvents();
@@ -381,15 +371,27 @@ namespace Qqtang.UnityClient
                 }
             }
 
+            _arenaView.HasActivePet = !_isOfflineSolo && _store.Pets.Exists(p => p.IsActive);
             _arenaView.SyncView(_sim);
             _battleView.UpdateHud(_sim, _activeBattleMapId);
         }
 
-        private static int CountConsumedPickups(Rule1BattleSimulation sim)
+        private void PlayBattleAudioCues(BattleAudioCue cues)
         {
-            int c = 0;
-            for (int i = 0; i < sim.Pickups.Count; i++) if (sim.Pickups[i].Consumed) c++;
-            return c;
+            if (cues == BattleAudioCue.None) return;
+            if ((cues & BattleAudioCue.BombPlace) != 0) _audio.PlaySfx("bubble-place", 0.55f);
+            if ((cues & BattleAudioCue.BombExplode) != 0) { _audio.PlaySfx("bubble-burst", 0.7f); _arenaView.TriggerShake(0.14f, 0.16f); }
+            if ((cues & BattleAudioCue.WoodBreak) != 0) _audio.PlaySfx("wood-break", 0.55f);
+            if ((cues & BattleAudioCue.WoodPush) != 0) _audio.PlaySfx("wood-push", 0.65f);
+            if ((cues & BattleAudioCue.BombKick) != 0) _audio.PlaySfx("bubble-kick", 0.7f);
+            if ((cues & BattleAudioCue.Pickup) != 0) _audio.PlaySfx("pickup", 0.65f);
+            if ((cues & BattleAudioCue.Trapped) != 0) _audio.PlaySfx("trapped", 0.75f);
+            if ((cues & BattleAudioCue.Rescued) != 0) _audio.PlaySfx("rescued", 0.75f);
+            if ((cues & BattleAudioCue.Eliminated) != 0) _audio.PlaySfx("eliminated", 0.8f);
+            if ((cues & BattleAudioCue.BunDelivery) != 0) _audio.PlaySfx("bun-delivery", 0.85f);
+            if ((cues & BattleAudioCue.Damage) != 0) _audio.PlaySfx("damage", 0.7f);
+            if ((cues & BattleAudioCue.Respawn) != 0) _audio.PlaySfx("respawn", 0.75f);
+            if ((cues & BattleAudioCue.Wave) != 0) _audio.PlaySfx("wave", 0.65f);
         }
 
         private static BattleDirection ReadMoveInput()
@@ -445,15 +447,15 @@ namespace Qqtang.UnityClient
             ShowToast($"对局开始！地图: {_catalogs.GetMapName((ushort)begin.MapId)}");
         }
 
-        public void StartOfflineSoloMatch(byte playerRoleId, int botCount)
+        public void StartOfflineSoloMatch(byte playerRoleId, int botCount, OfflinePracticeMode mode = OfflinePracticeMode.Classic, ushort mapId = 201)
         {
             _audio.PlaySfx("ui-click", 0.6f);
             _isOfflineSolo = true;
             _battlePeers.Clear();
             _offlineBots.Clear();
-            _activeBattleMapId = 201;
+            _activeBattleMapId = mapId;
 
-            int bots = Mathf.Clamp(botCount, 1, 3);
+            int bots = mode == OfflinePracticeMode.BossRaid ? 0 : Mathf.Clamp(botCount, 1, 3);
             int seed = Environment.TickCount;
             var begin = new GameBeginData
             {
@@ -464,11 +466,18 @@ namespace Qqtang.UnityClient
                 GameTimeMs = 180_000,
                 ArbitratorPlayerId = 1
             };
-            begin.Items.Add(new GameItemTypeData { ItemId = 1, Quantity = 6 });  // bomb capacity
-            begin.Items.Add(new GameItemTypeData { ItemId = 2, Quantity = 6 });  // bomb power
-            begin.Items.Add(new GameItemTypeData { ItemId = 3, Quantity = 4 });  // speed
-            begin.Items.Add(new GameItemTypeData { ItemId = 63, Quantity = 2 }); // needle
-            begin.Items.Add(new GameItemTypeData { ItemId = 41, Quantity = 2 }); // shield
+            begin.NewItems.Add(new GameItemTypeData { ItemId = 1, Quantity = 6 });   // Bomb capacity
+            begin.NewItems.Add(new GameItemTypeData { ItemId = 2, Quantity = 6 });   // Bomb power
+            begin.NewItems.Add(new GameItemTypeData { ItemId = 3, Quantity = 4 });   // Speed
+            begin.NewItems.Add(new GameItemTypeData { ItemId = 21, Quantity = 2 });  // Capture Trap (41)
+            begin.NewItems.Add(new GameItemTypeData { ItemId = 23, Quantity = 2 });  // Banana Peel (42)
+            begin.NewItems.Add(new GameItemTypeData { ItemId = 24, Quantity = 2 });  // Needle (63)
+            begin.NewItems.Add(new GameItemTypeData { ItemId = 25, Quantity = 2 });  // Glue (43 x3)
+            begin.NewItems.Add(new GameItemTypeData { ItemId = 27, Quantity = 2 });  // Dart (44 x2)
+            begin.NewItems.Add(new GameItemTypeData { ItemId = 28, Quantity = 2 });  // Remote Detonator (64)
+            begin.NewItems.Add(new GameItemTypeData { ItemId = 109, Quantity = 1 }); // Panda Transformation
+            begin.NewItems.Add(new GameItemTypeData { ItemId = 115, Quantity = 1 }); // Axe-Gang Transformation
+            begin.NewItems.Add(new GameItemTypeData { ItemId = 82, Quantity = 3 });  // Sugar Coin +100
             begin.Players.Add(new PlayerGameInfoData { PlayerId = 1, RoleId = playerRoleId, TeamId = 1 });
             for (int i = 0; i < bots; i++)
             {
@@ -481,11 +490,14 @@ namespace Qqtang.UnityClient
             LoadedMapData map = LoadBattleMap(_activeBattleMapId);
             _sim = new Rule1BattleSimulation { IsOfflineSoloMode = true };
             _sim.Initialize(begin, map, localPlayerId: 1, usesFreeRule: false);
+            _sim.ConfigureOfflineScenario(mode);
             _simAccumulatorMs = 0f;
 
             _arenaView.BuildArena(_sim);
             SetScreen(ClientScreenState.Battle);
-            ShowToast($"离线演武开始（1v{bots} AI），无需启动服务端！");
+            string modeName = mode == OfflinePracticeMode.BossRaid ? "单人 BOSS 挑战"
+                : (mode == OfflinePracticeMode.BunCapture ? "抢包山" : (mode == OfflinePracticeMode.SculptureDefense ? "雕塑攻防" : $"1v{bots} 演武"));
+            ShowToast($"离线{modeName}开始（地图 {_catalogs.GetMapName(mapId)}），无需启动服务端！");
         }
 
         public void ApplySettings(float master, float bgm, float sfx, bool muted, float zoom)
@@ -527,14 +539,32 @@ namespace Qqtang.UnityClient
             if (_sim.TryUseWorldItem(itemId))
             {
                 if (itemId == 63) _audio.PlaySfx("needle", 0.75f);
-                else if (itemId == 41 || itemId == 42 || itemId == 43) _audio.PlaySfx("shield", 0.75f);
+                else if (itemId == 44 || itemId == 46) _audio.PlaySfx("wave", 0.75f);
                 else _audio.PlaySfx("ui-click", 0.6f);
                 if (!_isOfflineSolo) FlushOutgoingBattleEvents();
             }
             else
             {
-                ShowToast(itemId == 63 ? "需要被困且持有针才能自救" : "当前无法使用该局内道具");
+                ShowToast(itemId == 63 ? "需要被困且持有针才能自救" : "当前未持有该局内道具或无法释放");
             }
+        }
+
+        public void TriggerBattleProjectileItem()
+        {
+            if (_sim?.LocalActor == null) return;
+            uint actionId = _sim.LocalActor.AxeCount > 0 ? 46u : 44u;
+            TriggerBattleWorldItem(actionId);
+        }
+
+        public async void RequestAdventureNextMap()
+        {
+            await RunSafeAsync(async () =>
+            {
+                if (_sim == null || !_store.InRoom) return;
+                uint continueId = _store.CurrentGameBegin != null ? (uint)Math.Max(0, _store.CurrentGameBegin.ContinueId) : 0u;
+                await _session.SendAdventureNextMapAsync(_store.RoomId, continueId, 0, _sim.ElapsedMs);
+                ShowToast("已踏入探险传送门，等待服务端载入下一关...");
+            });
         }
 
         public void TriggerBattleEmotion(uint emotionId)
@@ -572,6 +602,7 @@ namespace Qqtang.UnityClient
                 RequestRefreshLobby();
                 RequestRefreshPets();
                 RequestRefreshSocial();
+                _ = _session.CheckConfigFilesAsync();
             }
             catch (Exception ex)
             {
@@ -771,6 +802,30 @@ namespace Qqtang.UnityClient
             {
                 ushort res = await _session.SendSectionChatAsync(text, smallBugle);
                 if (res != 0) ShowToast("发送大厅聊天失败");
+            });
+        }
+
+        public async void RequestSendAcrossSectionChat(uint targetUin, string text)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.SendAcrossSectionChatAsync(text, targetUin);
+                if (res.ResultId != 0)
+                {
+                    ShowToast($"跨区私聊失败 (code={res.ResultId})");
+                }
+                else
+                {
+                    _store.LobbyChat.Add(new ChatMessageEntry
+                    {
+                        Channel = ChatChannel.Lobby,
+                        Sender = $"[私聊->{targetUin}]",
+                        Content = text,
+                        Highlight = true,
+                        Timestamp = DateTime.Now.ToString("HH:mm:ss")
+                    });
+                    _lobbyView.Refresh();
+                }
             });
         }
 
@@ -997,6 +1052,61 @@ namespace Qqtang.UnityClient
                     ShowToast("家族公告已更新");
                 }
                 else ShowToast($"更新失败：{res.Reason}");
+            });
+        }
+
+        public async void RequestSetKinDeclaration(string decl)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.SetKinDeclarationAsync(_store.KinIndex, decl);
+                if (res.Result == 0)
+                {
+                    var kb = await _session.FetchKinBaseAsync(_store.KinIndex);
+                    _store.ApplyKinBase(kb);
+                    ShowToast("家族宣言已更新");
+                }
+                else ShowToast($"更新宣言失败：{res.Reason}");
+            });
+        }
+
+        public async void RequestSetKinBadge(uint badgeId)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.SetKinBadgeAsync(_store.KinIndex, badgeId);
+                if (res.Result == 0)
+                {
+                    var kb = await _session.FetchKinBaseAsync(_store.KinIndex);
+                    _store.ApplyKinBase(kb);
+                    ShowToast($"家族族徽已设为 #{badgeId}");
+                }
+                else ShowToast($"设置族徽失败 (code={res.Result})");
+            });
+        }
+
+        public async void RequestAssignKinAuthority(uint dstUin, uint authorityId)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.AssignKinAuthorityAsync(_store.KinIndex, dstUin, authorityId);
+                if (res.Result == 0)
+                {
+                    var km = await _session.FetchKinMembersAsync(_store.KinIndex);
+                    _store.ApplyKinMembers(km);
+                    ShowToast($"已调整成员 {dstUin} 职级为 {authorityId}");
+                }
+                else ShowToast($"调整职级失败：{res.Reason}");
+            });
+        }
+
+        public async void RequestRefreshKinTop()
+        {
+            await RunSafeAsync(async () =>
+            {
+                var top = await _session.FetchKinTopAsync(_store.KinIndex);
+                _store.ApplyKinTop(top);
+                ShowToast($"已刷新全服仙门排行（荣誉 {top.HonorTop.Count} / 活跃 {top.ActiveTop.Count}）");
             });
         }
 

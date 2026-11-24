@@ -13,19 +13,37 @@ namespace Qqtang.Core.Protocol
 
     public static class ModeEventSchemas
     {
+        public const ushort NotifyChangeArbitrator = 0x0FB1;
         public const ushort RequestGetBun = 0x0FB6;
         public const ushort NotifyPlayerGetBun = 0x0FB7;
         public const ushort RequestPutBun = 0x0FB8;
         public const ushort NotifyPlayerPutBun = 0x0FB9;
         public const ushort NotifyMapElementExploded = 0x0FBE;
         public const ushort NotifyItemExploded = 0x0FBF;
+        public const ushort NotifyRecoverAvatar = 0x10E0;
+        public const ushort NotifyDispatchBomb = 0x10E1;
         public const ushort RequestEatBomb = 0x10E2;
         public const ushort NotifyPlayerEatBomb = 0x10E3;
+        public const ushort NotifyPlayerLeave = 0x10EC;
         public const ushort PlayerBeHarmed = 0x10F4;
+        public const ushort RequestCancelUseProp = 0x10F5;
+        public const ushort NotifyCancelUseProp = 0x10F6;
+        public const ushort NotifyPropTrigger = 0x10F7;
         public const ushort PlayerThrowBomb = 0x1159;
+        public const ushort NotifyProduceItem = 0x115A;
+        public const ushort NotifyWrestleSkill = 0x115B;
+        public const ushort RequestWrestle = 0x115C;
         public const ushort RequestPushMapElement = 0x115E;
         public const ushort NotifyPushMapElement = 0x115F;
+        public const ushort NotifyMapElementKnock = 0x1160;
+        public const ushort NotifyMapElementStop = 0x1161;
+        public const ushort NotifyPlayerKnocked = 0x1162;
+        public const ushort RequestDestroyBox = 0x1163;
+        public const ushort PlayerKnocked = 0x1164;
+        public const ushort BoxStopped = 0x1165;
         public const ushort NotifyPlayerTrapped = 0x1166;
+        public const ushort NotifyFire = 0x1167;
+        public const ushort NotifyGenerateBox = 0x1168;
         public const ushort NotifyNpcUseSkill = 0x1169;
         public const ushort NotifyNpcTalk = 0x116A;
         public const ushort NotifyNpcDropItem = 0x116B;
@@ -475,6 +493,426 @@ namespace Qqtang.Core.Protocol
             b.WriteUInt32(uin);
             b.WriteUInt16(weddingModeId);
             return b.ToArray();
+        }
+    }
+
+    // --- Additional Native Rule & Battle Event Codecs (Phase 4) ---
+
+    public sealed class AvatarRecoveryEventData
+    {
+        public ushort PlayerId;
+        public uint Time;
+        public ushort PosX;
+        public ushort PosY;
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(10);
+            b.WriteUInt16(PlayerId);
+            b.WriteUInt32(Time);
+            b.WriteUInt16(PosX);
+            b.WriteUInt16(PosY);
+            return b.ToArray();
+        }
+
+        public static AvatarRecoveryEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            return new AvatarRecoveryEventData
+            {
+                PlayerId = r.ReadUInt16(),
+                Time = r.ReadUInt32(),
+                PosX = r.ReadUInt16(),
+                PosY = r.ReadUInt16()
+            };
+        }
+    }
+
+    public sealed class DispatchBombEventData
+    {
+        public ushort PlayerId;
+        public uint Time;
+        public List<(uint sceneId, byte prop, byte row, byte col)> Bombs = new List<(uint, byte, byte, byte)>();
+        public List<(uint itemId, byte row, byte col)> Items = new List<(uint, byte, byte)>();
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(8 + Bombs.Count * 7 + Items.Count * 6);
+            b.WriteUInt16(PlayerId);
+            b.WriteUInt32(Time);
+            b.WriteByte((byte)Bombs.Count);
+            foreach (var bm in Bombs)
+            {
+                b.WriteUInt32(bm.sceneId);
+                b.WriteByte(bm.prop);
+                b.WriteByte(bm.row);
+                b.WriteByte(bm.col);
+            }
+            b.WriteByte((byte)Items.Count);
+            foreach (var it in Items)
+            {
+                b.WriteUInt32(it.itemId);
+                b.WriteByte(it.row);
+                b.WriteByte(it.col);
+            }
+            return b.ToArray();
+        }
+
+        public static DispatchBombEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            var d = new DispatchBombEventData
+            {
+                PlayerId = r.ReadUInt16(),
+                Time = r.ReadUInt32()
+            };
+            byte bCount = r.ReadByte();
+            for (int i = 0; i < bCount && r.Remaining >= 7; i++)
+                d.Bombs.Add((r.ReadUInt32(), r.ReadByte(), r.ReadByte(), r.ReadByte()));
+            if (r.Remaining >= 1)
+            {
+                byte iCount = r.ReadByte();
+                for (int i = 0; i < iCount && r.Remaining >= 6; i++)
+                    d.Items.Add((r.ReadUInt32(), r.ReadByte(), r.ReadByte()));
+            }
+            return d;
+        }
+    }
+
+    public sealed class ItemsExplodedEventData
+    {
+        public ushort PlayerId;
+        public uint Time;
+        public List<(uint itemId, byte row, byte col)> Items = new List<(uint, byte, byte)>();
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(7 + Items.Count * 6);
+            b.WriteUInt16(PlayerId);
+            b.WriteUInt32(Time);
+            b.WriteByte((byte)Items.Count);
+            foreach (var it in Items)
+            {
+                b.WriteUInt32(it.itemId);
+                b.WriteByte(it.row);
+                b.WriteByte(it.col);
+            }
+            return b.ToArray();
+        }
+
+        public static ItemsExplodedEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            var d = new ItemsExplodedEventData { PlayerId = r.ReadUInt16(), Time = r.ReadUInt32() };
+            byte count = r.ReadByte();
+            for (int i = 0; i < count && r.Remaining >= 6; i++)
+                d.Items.Add((r.ReadUInt32(), r.ReadByte(), r.ReadByte()));
+            return d;
+        }
+    }
+
+    public sealed class EatBombActionData
+    {
+        public ushort PlayerId;
+        public ushort Time;
+        public uint PlayerAvatar;
+        public ushort PosX;
+        public ushort PosY;
+        public ushort BombPlayerId;
+        public uint BombTime;
+        public byte BombRow;
+        public byte BombCol;
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(20);
+            b.WriteUInt16(PlayerId);
+            b.WriteUInt16(Time);
+            b.WriteUInt32(PlayerAvatar);
+            b.WriteUInt16(PosX);
+            b.WriteUInt16(PosY);
+            b.WriteUInt16(BombPlayerId);
+            b.WriteUInt32(BombTime);
+            b.WriteByte(BombRow);
+            b.WriteByte(BombCol);
+            return b.ToArray();
+        }
+
+        public static EatBombActionData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            return new EatBombActionData
+            {
+                PlayerId = r.ReadUInt16(),
+                Time = r.ReadUInt16(),
+                PlayerAvatar = r.ReadUInt32(),
+                PosX = r.ReadUInt16(),
+                PosY = r.ReadUInt16(),
+                BombPlayerId = r.ReadUInt16(),
+                BombTime = r.ReadUInt32(),
+                BombRow = r.ReadByte(),
+                BombCol = r.ReadByte()
+            };
+        }
+    }
+
+    [Flags]
+    public enum PassiveFunctionEffectMask : byte
+    {
+        None = 0,
+        Lightning = 1 << 0,
+        SwordArc = 1 << 1,
+        KickImpact = 1 << 2
+    }
+
+    public sealed class PassiveFunctionProjectionData
+    {
+        public byte Rule;
+        public ushort PlayerId;
+        public PassiveFunctionEffectMask Effects;
+        public bool Reset;
+
+        public static bool IsProjectionBody(byte[] body) =>
+            body != null && body.Length >= 10 && body[0] == 0xFE && body[1] == (byte)'Q' && body[2] == (byte)'F';
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(12);
+            b.WriteByte(0xFE);
+            b.WriteByte((byte)'Q');
+            b.WriteByte((byte)'F');
+            b.WriteByte((byte)(Rule | (Reset ? 0x80 : 0)));
+            b.WriteUInt16(PlayerId);
+            b.WriteUInt32((uint)Effects);
+            b.WriteByte(0);
+            b.WriteByte(0);
+            return b.ToArray();
+        }
+
+        public static PassiveFunctionProjectionData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            r.Skip(3); // FE Q F
+            byte rawRule = r.ReadByte();
+            return new PassiveFunctionProjectionData
+            {
+                Rule = (byte)(rawRule & 0x7F),
+                Reset = (rawRule & 0x80) != 0,
+                PlayerId = r.ReadUInt16(),
+                Effects = (PassiveFunctionEffectMask)(r.ReadUInt32() & 0xFF)
+            };
+        }
+    }
+
+    public sealed class KickBombActionData
+    {
+        public byte FromRow;
+        public byte FromCol;
+        public byte DestRow;
+        public byte DestCol;
+        public byte BombProp;
+        public byte Direction;
+        public byte Power;
+        public uint Time;
+        public ushort PlayerId;
+        public ushort BombPower;
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(13);
+            b.WriteByte((byte)((FromRow << 4) | (FromCol & 0x0F)));
+            b.WriteByte((byte)((DestRow << 4) | (DestCol & 0x0F)));
+            b.WriteByte(BombProp);
+            b.WriteByte(Direction);
+            b.WriteByte(Power);
+            b.WriteUInt32(Time);
+            b.WriteUInt16(PlayerId);
+            b.WriteUInt16(BombPower);
+            return b.ToArray();
+        }
+
+        public static KickBombActionData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            byte src = r.ReadByte();
+            byte dst = r.ReadByte();
+            return new KickBombActionData
+            {
+                FromRow = (byte)(src >> 4),
+                FromCol = (byte)(src & 0x0F),
+                DestRow = (byte)(dst >> 4),
+                DestCol = (byte)(dst & 0x0F),
+                BombProp = r.ReadByte(),
+                Direction = r.ReadByte(),
+                Power = r.ReadByte(),
+                Time = r.ReadUInt32(),
+                PlayerId = r.ReadUInt16(),
+                BombPower = r.ReadUInt16()
+            };
+        }
+    }
+
+    public sealed class ProduceItemEventData
+    {
+        public byte Row;
+        public byte Col;
+        public uint ItemId;
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(5);
+            b.WriteByte((byte)((Row << 4) | (Col & 0x0F)));
+            b.WriteUInt32(ItemId);
+            return b.ToArray();
+        }
+
+        public static ProduceItemEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            byte rc = r.ReadByte();
+            return new ProduceItemEventData { Row = (byte)(rc >> 4), Col = (byte)(rc & 0x0F), ItemId = r.ReadUInt32() };
+        }
+    }
+
+    public sealed class WrestleActionEventData
+    {
+        public byte SkillType;
+        public byte FirstTeam;
+        public byte PlayerPos;
+        public ushort PlayerId;
+        public uint Time;
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(9);
+            b.WriteByte(SkillType);
+            b.WriteByte(FirstTeam);
+            b.WriteByte(PlayerPos);
+            b.WriteUInt16(PlayerId);
+            b.WriteUInt32(Time);
+            return b.ToArray();
+        }
+
+        public static WrestleActionEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            return new WrestleActionEventData
+            {
+                SkillType = r.ReadByte(),
+                FirstTeam = r.ReadByte(),
+                PlayerPos = r.ReadByte(),
+                PlayerId = r.ReadUInt16(),
+                Time = r.ReadUInt32()
+            };
+        }
+    }
+
+    public sealed class NpcDropItemEventData
+    {
+        public ushort ObjectId;
+        public ushort PosX;
+        public ushort PosY;
+        public List<(uint itemId, byte row, byte col)> Items = new List<(uint, byte, byte)>();
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(7 + Items.Count * 6);
+            b.WriteUInt16(ObjectId);
+            b.WriteUInt16(PosX);
+            b.WriteUInt16(PosY);
+            b.WriteByte((byte)Items.Count);
+            foreach (var it in Items)
+            {
+                b.WriteUInt32(it.itemId);
+                b.WriteByte(it.row);
+                b.WriteByte(it.col);
+            }
+            return b.ToArray();
+        }
+
+        public static NpcDropItemEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            var d = new NpcDropItemEventData
+            {
+                ObjectId = r.ReadUInt16(),
+                PosX = r.ReadUInt16(),
+                PosY = r.ReadUInt16()
+            };
+            byte count = r.ReadByte();
+            for (int i = 0; i < count && r.Remaining >= 6; i++)
+                d.Items.Add((r.ReadUInt32(), r.ReadByte(), r.ReadByte()));
+            return d;
+        }
+    }
+
+    public sealed class TankBaseHpEventData
+    {
+        public ushort PlayerId;
+        public uint Time;
+        public ushort TeamId;
+        public short ChangeHp;
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(10);
+            b.WriteUInt16(PlayerId);
+            b.WriteUInt32(Time);
+            b.WriteUInt16(TeamId);
+            b.WriteUInt16((ushort)ChangeHp);
+            return b.ToArray();
+        }
+
+        public static TankBaseHpEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            return new TankBaseHpEventData
+            {
+                PlayerId = r.ReadUInt16(),
+                Time = r.ReadUInt32(),
+                TeamId = r.ReadUInt16(),
+                ChangeHp = (short)r.ReadUInt16()
+            };
+        }
+    }
+
+    public sealed class PlayerTimedStateEventData
+    {
+        public ushort PlayerId;
+        public uint Time;
+        public byte Value;
+
+        public static PlayerTimedStateEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            return new PlayerTimedStateEventData
+            {
+                PlayerId = r.ReadUInt16(),
+                Time = r.ReadUInt32(),
+                Value = r.Remaining >= 1 ? r.ReadByte() : (byte)0
+            };
+        }
+    }
+
+    public sealed class ChangeArbitratorEventData
+    {
+        public ushort NewArbitratorPlayerId;
+
+        public static ChangeArbitratorEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            return new ChangeArbitratorEventData { NewArbitratorPlayerId = r.Remaining >= 2 ? r.ReadUInt16() : (ushort)0 };
+        }
+    }
+
+    public sealed class PlayerLeaveBattleEventData
+    {
+        public ushort PlayerId;
+
+        public static PlayerLeaveBattleEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            return new PlayerLeaveBattleEventData { PlayerId = r.Remaining >= 2 ? r.ReadUInt16() : (ushort)0 };
         }
     }
 }

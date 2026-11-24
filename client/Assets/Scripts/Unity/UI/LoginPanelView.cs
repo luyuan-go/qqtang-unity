@@ -1,4 +1,5 @@
 using System;
+using Qqtang.Core.Battle;
 using Qqtang.Core.State;
 using UnityEngine;
 using UnityEngine.UI;
@@ -18,6 +19,8 @@ namespace Qqtang.UnityClient.UI
         private readonly Button _loginBtn;
         private readonly Image[] _roleBorders = new Image[4];
         private byte _selectedRoleId = 1;
+        private ushort _selectedOfflineMapId = 201;
+        private readonly Text _offlineMapLabel;
 
         public LoginPanelView(Transform parent, UiContext ctx)
         {
@@ -30,8 +33,8 @@ namespace Qqtang.UnityClient.UI
             card.anchorMin = new Vector2(0.5f, 0.5f);
             card.anchorMax = new Vector2(0.5f, 0.5f);
             card.pivot = new Vector2(0.5f, 0.5f);
-            card.sizeDelta = new Vector2(690f, 610f);
-            UiFactory.AddVLayout(card.gameObject, 10f, 28, 18);
+            card.sizeDelta = new Vector2(720f, 660f);
+            UiFactory.AddVLayout(card.gameObject, 9f, 26, 16);
 
             // Header banner (Daoist logo sprite if cached, plus subtitle)
             var logoSprite = _ctx.Art.GetLogoSprite();
@@ -121,20 +124,40 @@ namespace Qqtang.UnityClient.UI
             }
             SelectRole(1);
 
-            // Login + Offline Solo Practice buttons
-            var actionRow = UiFactory.CreateEmpty(card, "LoginActions");
-            UiFactory.AddHLayout(actionRow.gameObject, 10f, 0, 0);
-            UiFactory.SetLayout(actionRow.gameObject, prefH: 46f);
-            _loginBtn = UiFactory.CreateButton(actionRow, "联机登录灵葫堂", TriggerLogin, UiFactory.AccentVermilion, fontSize: 17, height: 46f);
-            UiFactory.SetLayout(_loginBtn.gameObject, flexW: 1.4f, prefH: 46f);
-            var solo1Btn = UiFactory.CreateButton(actionRow, "离线 1v1 演武", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 1), UiFactory.AccentCeladon, fontSize: 14, width: 132f, height: 46f);
-            var solo3Btn = UiFactory.CreateButton(actionRow, "离线 1v3 混战", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 3), UiFactory.AccentGold, UiFactory.TextInk, fontSize: 14, width: 132f, height: 46f);
-            _ = solo1Btn;
-            _ = solo3Btn;
+            // Login button
+            _loginBtn = UiFactory.CreateButton(card, "联机登录灵葫堂", TriggerLogin, UiFactory.AccentVermilion, fontSize: 17, height: 42f);
+            UiFactory.SetLayout(_loginBtn.gameObject, flexW: 1f, prefH: 42f);
+
+            // Offline Solo Practice mode & map selector bar
+            var offlineMapRow = UiFactory.CreateEmpty(card, "OfflineMapRow");
+            UiFactory.AddHLayout(offlineMapRow.gameObject, 6f, 0, 0);
+            UiFactory.SetLayout(offlineMapRow.gameObject, prefH: 28f);
+            _offlineMapLabel = UiFactory.CreateText(offlineMapRow, "离线地图: 包子01(201)", 12, UiFactory.AccentGold, FontStyle.Bold);
+            UiFactory.SetLayout(_offlineMapLabel.gameObject, flexW: 1f, prefH: 26f);
+            UiFactory.CreateButton(offlineMapRow, "包子01", () => SelectOfflineMap(201, "包子01"), UiFactory.AccentMuted, fontSize: 11, width: 64f, height: 24f);
+            UiFactory.CreateButton(offlineMapRow, "水面01", () => SelectOfflineMap(1, "水面01"), UiFactory.AccentMuted, fontSize: 11, width: 64f, height: 24f);
+            UiFactory.CreateButton(offlineMapRow, "英雄01", () => SelectOfflineMap(101, "英雄01"), UiFactory.AccentMuted, fontSize: 11, width: 64f, height: 24f);
+            UiFactory.CreateButton(offlineMapRow, "抢包山", () => SelectOfflineMap(301, "抢包山01"), UiFactory.AccentMuted, fontSize: 11, width: 64f, height: 24f);
+
+            var actionRow = UiFactory.CreateEmpty(card, "OfflineActions");
+            UiFactory.AddHLayout(actionRow.gameObject, 8f, 0, 0);
+            UiFactory.SetLayout(actionRow.gameObject, prefH: 38f);
+            UiFactory.CreateButton(actionRow, "离线 1v1 竞技", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 1, OfflinePracticeMode.Classic, _selectedOfflineMapId), UiFactory.AccentCeladon, fontSize: 13, width: 126f, height: 36f);
+            UiFactory.CreateButton(actionRow, "离线 1v3 混战", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 3, OfflinePracticeMode.Classic, _selectedOfflineMapId), UiFactory.AccentGold, UiFactory.TextInk, fontSize: 13, width: 126f, height: 36f);
+            UiFactory.CreateButton(actionRow, "单人 BOSS 挑战", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 0, OfflinePracticeMode.BossRaid, _selectedOfflineMapId), UiFactory.AccentVermilion, fontSize: 13, width: 132f, height: 36f);
+            UiFactory.CreateButton(actionRow, "抢包山", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 1, OfflinePracticeMode.BunCapture, _selectedOfflineMapId), UiFactory.AccentCeladon, fontSize: 13, width: 92f, height: 36f);
+            UiFactory.CreateButton(actionRow, "雕塑攻防", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 1, OfflinePracticeMode.SculptureDefense, _selectedOfflineMapId), UiFactory.AccentMuted, fontSize: 13, width: 96f, height: 36f);
 
             // Status bar
             _statusText = UiFactory.CreateText(card, "请先启动本地 Go 服务端 (tools/start-local-server.ps1)，再点击登录。", 13, UiFactory.TextSubtle, TextAnchor.MiddleCenter);
             UiFactory.SetLayout(_statusText.gameObject, prefH: 34f);
+        }
+
+        private void SelectOfflineMap(ushort mapId, string name)
+        {
+            _selectedOfflineMapId = mapId;
+            if (_offlineMapLabel != null)
+                _offlineMapLabel.text = $"离线地图: {name}({mapId})";
         }
 
         private void SelectRole(byte roleId)

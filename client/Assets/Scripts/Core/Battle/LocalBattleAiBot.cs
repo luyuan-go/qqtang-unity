@@ -114,6 +114,8 @@ namespace Qqtang.Core.Battle
                 if (InBounds(map, f.Cell)) danger[f.Cell.Row, f.Cell.Col] = true;
             foreach (var b in sim.Bombs)
                 MarkBombDanger(map, danger, b.Cell, b.Power);
+            foreach (var obj in sim.FieldObjects)
+                if (InBounds(map, obj.Cell)) danger[obj.Cell.Row, obj.Cell.Col] = true;
             return danger;
         }
 

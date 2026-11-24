@@ -38,11 +38,17 @@ namespace Qqtang.UnityClient.UI
         private readonly RectTransform _chatContent;
         private readonly InputField _chatInput;
         private readonly Toggle _bugleToggle;
+        private readonly Text _whisperTargetText;
+        private uint _whisperTargetUin;
         private readonly Text _roomCountText;
         private readonly Text _playerCountText;
         private int _modeFilter = -1; // -1 = all
 
         // Modals
+        private readonly RectTransform _profileModal;
+        private readonly Text _profileBodyText;
+        private readonly RectTransform _compProgFill;
+        private readonly RectTransform _advProgFill;
         private readonly RectTransform _createModal;
         private readonly InputField _createNameInput;
         private readonly InputField _createPwdInput;
@@ -98,6 +104,7 @@ namespace Qqtang.UnityClient.UI
             _moneyText = UiFactory.CreateText(topBar, "糖币: 0", 14, UiFactory.AccentGold, TextAnchor.MiddleRight, FontStyle.Bold);
             UiFactory.SetLayout(_moneyText.gameObject, prefW: 120f, prefH: 42f);
 
+            UiFactory.CreateButton(topBar, "战绩", OpenProfileModal, UiFactory.AccentCeladon, fontSize: 13, width: 58f, height: 34f);
             UiFactory.CreateButton(topBar, "设置", OpenSettingsModal, UiFactory.AccentMuted, fontSize: 13, width: 58f, height: 34f);
             UiFactory.CreateButton(topBar, "注销", () => _ctx.App.RequestLogout(), UiFactory.AccentDanger, fontSize: 13, width: 58f, height: 34f);
 
@@ -159,9 +166,12 @@ namespace Qqtang.UnityClient.UI
             UiFactory.AddHLayout(chatHdr.gameObject, 6f, 0, 0);
             UiFactory.SetLayout(chatHdr.gameObject, prefH: 24f);
             var cTitle = UiFactory.CreateText(chatHdr, "大厅聊天", 15, UiFactory.AccentGold, TextAnchor.MiddleLeft, FontStyle.Bold);
-            UiFactory.SetLayout(cTitle.gameObject, flexW: 1f, prefH: 24f);
+            UiFactory.SetLayout(cTitle.gameObject, prefW: 72f, prefH: 24f);
+            _whisperTargetText = UiFactory.CreateText(chatHdr, "公屏", 11, UiFactory.AccentCeladon, TextAnchor.MiddleLeft);
+            UiFactory.SetLayout(_whisperTargetText.gameObject, flexW: 1f, prefH: 22f);
+            UiFactory.CreateButton(chatHdr, "公屏", () => SetWhisperTarget(0, null), UiFactory.AccentMuted, fontSize: 10, width: 38f, height: 20f);
             _bugleToggle = UiFactory.CreateToggle(chatHdr, "小喇叭", false, height: 22f);
-            UiFactory.SetLayout(_bugleToggle.gameObject, prefW: 82f, prefH: 22f);
+            UiFactory.SetLayout(_bugleToggle.gameObject, prefW: 72f, prefH: 22f);
 
             var chatScroll = UiFactory.CreateScrollView(chatBox, "ChatScroll", out _chatContent, spacing: 3f);
             UiFactory.SetLayout(chatScroll.gameObject, flexW: 1f, flexH: 1f);
@@ -241,7 +251,7 @@ namespace Qqtang.UnityClient.UI
             UiFactory.SetLayout(_artStatsText.gameObject, prefH: 22f);
 
             var guide = UiFactory.CreateText(sCard,
-                "操作键位：WASD/方向键 移动 | Space/J 放泡 | 1 扎针 | 2 护盾 | 3 遥控 | E 表情 | Enter 局内聊天 | Esc 菜单",
+                "操作键位：WASD/方向键 移动 | Space/J 放泡 | 1 扎针 | 2 陷阱 | 3 香蕉 | 4 胶水 | 5 飞镖/斧 | 6 遥控 | E 表情 | Enter 聊天 | Esc 菜单",
                 12, UiFactory.TextSubtle);
             UiFactory.SetLayout(guide.gameObject, prefH: 38f);
 
@@ -250,6 +260,67 @@ namespace Qqtang.UnityClient.UI
             UiFactory.SetLayout(smBtns.gameObject, prefH: 36f);
             UiFactory.CreateButton(smBtns, "完成并关闭", () => _settingsModal.gameObject.SetActive(false), UiFactory.AccentCeladon, width: 140f, height: 34f);
             _settingsModal.gameObject.SetActive(false);
+
+            // Career / Rank Progression Profile Modal
+            _profileModal = UiFactory.CreatePanel(ShellRoot, "ProfileModal", UiFactory.BgModalBackdrop);
+            UiFactory.Stretch(_profileModal);
+            var profCard = UiFactory.CreatePanel(_profileModal, "Card", UiFactory.BgSlateCard, UiFactory.AccentGold);
+            profCard.anchorMin = profCard.anchorMax = profCard.pivot = new Vector2(0.5f, 0.5f);
+            profCard.sizeDelta = new Vector2(520f, 400f);
+            UiFactory.AddVLayout(profCard.gameObject, 10f, 22, 18);
+
+            var pHdr = UiFactory.CreateText(profCard, "道友生涯与段位档案", 20, UiFactory.AccentGold, TextAnchor.MiddleCenter, FontStyle.Bold);
+            UiFactory.SetLayout(pHdr.gameObject, prefH: 30f);
+
+            _profileBodyText = UiFactory.CreateText(profCard, "", 14, UiFactory.TextLight, TextAnchor.UpperLeft);
+            UiFactory.SetLayout(_profileBodyText.gameObject, flexH: 1f);
+
+            var cBarBg = UiFactory.CreatePanel(profCard, "CompBarBg", new Color(0.06f, 0.10f, 0.14f, 1f), UiFactory.BorderGold);
+            UiFactory.SetLayout(cBarBg.gameObject, prefH: 16f);
+            _compProgFill = UiFactory.CreatePanel(cBarBg, "Fill", UiFactory.AccentGold);
+            _compProgFill.anchorMin = Vector2.zero;
+            _compProgFill.anchorMax = new Vector2(0.5f, 1f);
+            _compProgFill.offsetMin = _compProgFill.offsetMax = Vector2.zero;
+
+            var aBarBg = UiFactory.CreatePanel(profCard, "AdvBarBg", new Color(0.06f, 0.10f, 0.14f, 1f), UiFactory.BorderSubtle);
+            UiFactory.SetLayout(aBarBg.gameObject, prefH: 14f);
+            _advProgFill = UiFactory.CreatePanel(aBarBg, "Fill", UiFactory.AccentCeladon);
+            _advProgFill.anchorMin = Vector2.zero;
+            _advProgFill.anchorMax = new Vector2(0.2f, 1f);
+            _advProgFill.offsetMin = _advProgFill.offsetMax = Vector2.zero;
+
+            var pBtns = UiFactory.CreateEmpty(profCard, "Btns");
+            UiFactory.AddHLayout(pBtns.gameObject, 10f, 0, 0, TextAnchor.MiddleCenter);
+            UiFactory.SetLayout(pBtns.gameObject, prefH: 36f);
+            UiFactory.CreateButton(pBtns, "关闭档案", () => _profileModal.gameObject.SetActive(false), UiFactory.AccentCeladon, width: 130f, height: 34f);
+            _profileModal.gameObject.SetActive(false);
+        }
+
+        private void OpenProfileModal()
+        {
+            var s = _ctx.Store;
+            var g = s.GameInfo ?? new GameInfoData();
+            var comp = StaticCatalogs.GetCompetitiveRankInfo(g.Point);
+            var adv = StaticCatalogs.GetAdventureRankInfo(g.ExtPoint);
+            uint total = g.WinNum + g.LossNum + g.EqualNum;
+            float winRate = total > 0 ? (g.WinNum * 100f / total) : 0f;
+            string kinStr = s.KinBase != null ? $"{s.KinBase.Name} (族徽#{s.KinBase.FlagId})" : "未加入家族";
+            string spouseStr = s.Marriage != null && s.Marriage.IsMarried ? $"{s.Marriage.SpouseNickname} (甜蜜度 {s.Marriage.Loyalty})" : "单身逍遥";
+
+            _profileBodyText.text =
+                $"昵称：{s.Nickname}    账号 UIN：{s.Uin}\n" +
+                $"竞技段位：{comp.title} (Lv.{comp.degree}/180)\n" +
+                $"竞技积分：{g.Point} / {comp.nextPoints}  ({Mathf.RoundToInt(comp.progress * 100f)}%)\n" +
+                $"探险等级：Lv.{adv.level}/30  (探险经验 {g.ExtPoint} / {adv.nextPoints})\n" +
+                $"竞技战绩：{g.WinNum} 胜 / {g.LossNum} 负 / {g.EqualNum} 平  (胜率 {winRate:F1}%)\n" +
+                $"探险战绩：{g.ExtWinNum} 胜 / {g.ExtLossNum} 负 / {g.ExtEqualNum} 平\n" +
+                $"糖币余额：{g.Money}    荣誉点：{s.Honor}    背包物品：{s.Inventory.Count} 件\n" +
+                $"所属仙门：{kinStr}    结缘道侣：{spouseStr}\n" +
+                $"下方双进度条：金条=竞技段位进度，青条=探险等级进度";
+
+            _compProgFill.anchorMax = new Vector2(Mathf.Clamp01(comp.progress), 1f);
+            _advProgFill.anchorMax = new Vector2(Mathf.Clamp01(adv.progress), 1f);
+            _profileModal.gameObject.SetActive(true);
         }
 
         private void OpenSettingsModal()
@@ -353,7 +424,9 @@ namespace Qqtang.UnityClient.UI
                 if (p.Uin != s.Uin)
                 {
                     uint target = p.Uin;
-                    UiFactory.CreateButton(row, "+好友", () => _ctx.App.RequestAddFriend(target, "大厅结交道友"), UiFactory.AccentCeladon, fontSize: 11, width: 54f, height: 24f);
+                    string tName = p.Nickname;
+                    UiFactory.CreateButton(row, "私聊", () => SetWhisperTarget(target, tName), UiFactory.AccentGold, UiFactory.TextInk, fontSize: 11, width: 42f, height: 24f);
+                    UiFactory.CreateButton(row, "+好友", () => _ctx.App.RequestAddFriend(target, "大厅结交道友"), UiFactory.AccentCeladon, fontSize: 11, width: 50f, height: 24f);
                 }
             }
 
@@ -411,12 +484,22 @@ namespace Qqtang.UnityClient.UI
             _ctx.App.RequestCreateRoom(name, flag, _createGameType, pwd);
         }
 
+        private void SetWhisperTarget(uint targetUin, string name)
+        {
+            _whisperTargetUin = targetUin;
+            if (_whisperTargetText != null)
+                _whisperTargetText.text = targetUin > 0 ? $"私聊->{name}({targetUin})" : "公屏";
+        }
+
         private void SendLobbyChat()
         {
             string text = _chatInput.text.Trim();
             if (string.IsNullOrEmpty(text)) return;
             _chatInput.text = string.Empty;
-            _ctx.App.RequestSendLobbyChat(text, _bugleToggle.isOn);
+            if (_whisperTargetUin > 0)
+                _ctx.App.RequestSendAcrossSectionChat(_whisperTargetUin, text);
+            else
+                _ctx.App.RequestSendLobbyChat(text, _bugleToggle.isOn);
         }
 
         public static string ModeLabel(RoomGameType t)

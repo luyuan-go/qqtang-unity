@@ -40,8 +40,11 @@ namespace Qqtang.UnityClient.UI
         private readonly Text _kinInfoText;
         private readonly InputField _kinInviteUinInput;
         private readonly InputField _kinNoticeInput;
+        private readonly InputField _kinDeclInput;
+        private readonly InputField _kinBadgeInput;
         private readonly RectTransform _kinMembersContent;
         private readonly RectTransform _kinChatContent;
+        private readonly RectTransform _kinTopContent;
         private readonly InputField _kinChatInput;
 
         // Marriage
@@ -163,9 +166,18 @@ namespace Qqtang.UnityClient.UI
 
             var kinNotifRow = UiFactory.CreateEmpty(kinLeft, "KinNotifRow");
             UiFactory.AddHLayout(kinNotifRow.gameObject, 6f, 0, 0);
-            UiFactory.SetLayout(kinNotifRow.gameObject, prefH: 34f);
-            _kinNoticeInput = UiFactory.CreateInputField(kinNotifRow, "新家族公告...", "", height: 30f);
-            UiFactory.CreateButton(kinNotifRow, "更新公告", () => _ctx.App.RequestSetKinNotification(_kinNoticeInput.text.Trim()), UiFactory.AccentCeladon, fontSize: 12, width: 84f, height: 30f);
+            UiFactory.SetLayout(kinNotifRow.gameObject, prefH: 32f);
+            _kinNoticeInput = UiFactory.CreateInputField(kinNotifRow, "新家族公告...", "", height: 28f);
+            UiFactory.CreateButton(kinNotifRow, "改公告", () => _ctx.App.RequestSetKinNotification(_kinNoticeInput.text.Trim()), UiFactory.AccentCeladon, fontSize: 12, width: 68f, height: 28f);
+            _kinBadgeInput = UiFactory.CreateInputField(kinNotifRow, "族徽ID", "1", width: 58f, height: 28f);
+            UiFactory.CreateButton(kinNotifRow, "设族徽", () => { if (uint.TryParse(_kinBadgeInput.text.Trim(), out uint b)) _ctx.App.RequestSetKinBadge(b); }, UiFactory.AccentGold, UiFactory.TextInk, fontSize: 11, width: 58f, height: 28f);
+
+            var kinDeclRow = UiFactory.CreateEmpty(kinLeft, "KinDeclRow");
+            UiFactory.AddHLayout(kinDeclRow.gameObject, 6f, 0, 0);
+            UiFactory.SetLayout(kinDeclRow.gameObject, prefH: 32f);
+            _kinDeclInput = UiFactory.CreateInputField(kinDeclRow, "新家族宣言...", "", height: 28f);
+            UiFactory.CreateButton(kinDeclRow, "改宣言", () => _ctx.App.RequestSetKinDeclaration(_kinDeclInput.text.Trim()), UiFactory.AccentMuted, fontSize: 12, width: 68f, height: 28f);
+            UiFactory.CreateButton(kinDeclRow, "刷新排行", () => _ctx.App.RequestRefreshKinTop(), UiFactory.AccentCeladon, fontSize: 12, width: 76f, height: 28f);
 
             var kmScroll = UiFactory.CreateScrollView(kinLeft, "KinMembers", out _kinMembersContent, spacing: 4f);
             UiFactory.SetLayout(kmScroll.gameObject, flexW: 1f, flexH: 1f);
@@ -188,6 +200,11 @@ namespace Qqtang.UnityClient.UI
                 _kinChatInput.text = string.Empty;
                 _ctx.App.RequestSendKinChat(m);
             }, UiFactory.AccentCeladon, fontSize: 12, width: 64f, height: 30f);
+
+            var ktTitle = UiFactory.CreateText(kinRight, "全服仙门排行（荣誉 / 活跃）", 13, UiFactory.AccentGold, FontStyle.Bold);
+            UiFactory.SetLayout(ktTitle.gameObject, prefH: 20f);
+            var ktScroll = UiFactory.CreateScrollView(kinRight, "KinTopScroll", out _kinTopContent, spacing: 2f);
+            UiFactory.SetLayout(ktScroll.gameObject, flexW: 1f, prefH: 118f);
 
             // -- Marriage Panel --
             _marriagePanel = UiFactory.CreatePanel(sBody, "MarriagePanel", UiFactory.BgSlateLight, UiFactory.BorderGold);
@@ -353,7 +370,7 @@ namespace Qqtang.UnityClient.UI
             else
             {
                 var kb = s.KinBase;
-                _kinInfoText.text = $"[{kb.Name}] (ID:{kb.Index}) | 成员:{kb.MemberCount} | 荣誉:{kb.Honor} | 活跃:{kb.ActivePoint}\n宣言: {kb.Declaration}   公告: {kb.Notification}";
+                _kinInfoText.text = $"[{kb.Name}] (ID:{kb.Index} 族徽:#{kb.FlagId}) | 成员:{kb.MemberCount} | 荣誉:{kb.Honor} | 活跃:{kb.ActivePoint}\n宣言: {kb.Declaration}   公告: {kb.Notification}";
 
                 UiFactory.ClearChildren(_kinMembersContent);
                 foreach (var m in s.KinMembers)
@@ -361,13 +378,23 @@ namespace Qqtang.UnityClient.UI
                     var row = UiFactory.CreatePanel(_kinMembersContent, $"KM_{m.Uin}", UiFactory.BgSlateCard);
                     UiFactory.SetLayout(row.gameObject, prefH: 34f);
                     UiFactory.AddHLayout(row.gameObject, 6f, 8, 4);
-                    var t = UiFactory.CreateText(row, $"{(m.IsOnline ? "●" : "○")} {m.Nickname} ({m.Uin}) | 荣誉:{m.Honor}", 13,
+                    var t = UiFactory.CreateText(row, $"{(m.IsOnline ? "●" : "○")} {m.Nickname} ({m.Uin}) | 职级:{m.Grade} 荣誉:{m.Honor}", 12,
                         m.Uin == kb.OwnerUin ? UiFactory.AccentGold : UiFactory.TextLight);
                     UiFactory.SetLayout(t.gameObject, flexW: 1f, prefH: 24f);
                     if (kb.OwnerUin == s.Uin && m.Uin != s.Uin)
                     {
                         uint target = m.Uin;
-                        UiFactory.CreateButton(row, "移出", () => _ctx.App.RequestKickKinMember(target), UiFactory.AccentDanger, fontSize: 11, width: 52f, height: 24f);
+                        if (m.Grade < 10)
+                        {
+                            uint upAuth = Math.Min(10u, m.Grade + 2u);
+                            UiFactory.CreateButton(row, "升职", () => _ctx.App.RequestAssignKinAuthority(target, upAuth), UiFactory.AccentCeladon, fontSize: 11, width: 42f, height: 24f);
+                        }
+                        if (m.Grade > 4)
+                        {
+                            uint downAuth = Math.Max(4u, m.Grade - 2u);
+                            UiFactory.CreateButton(row, "降职", () => _ctx.App.RequestAssignKinAuthority(target, downAuth), UiFactory.AccentMuted, fontSize: 11, width: 42f, height: 24f);
+                        }
+                        UiFactory.CreateButton(row, "移出", () => _ctx.App.RequestKickKinMember(target), UiFactory.AccentDanger, fontSize: 11, width: 42f, height: 24f);
                     }
                 }
 
@@ -377,6 +404,26 @@ namespace Qqtang.UnityClient.UI
                     var line = UiFactory.CreateText(_kinChatContent, $"[{msg.Timestamp}] {msg.Sender}: {msg.Content}", 13,
                         msg.Highlight ? UiFactory.AccentGold : UiFactory.TextLight);
                     UiFactory.SetLayout(line.gameObject, prefH: 20f);
+                }
+
+                UiFactory.ClearChildren(_kinTopContent);
+                if (s.KinHonorTop.Count == 0 && s.KinActiveTop.Count == 0)
+                {
+                    var emptyTop = UiFactory.CreateText(_kinTopContent, "点击左侧「刷新排行」拉取全服荣誉与活跃榜单。", 12, UiFactory.TextSubtle);
+                    UiFactory.SetLayout(emptyTop.gameObject, prefH: 20f);
+                }
+                else
+                {
+                    foreach (var h in s.KinHonorTop)
+                    {
+                        var l = UiFactory.CreateText(_kinTopContent, $"[荣誉#{h.Order}] {h.Name} (ID:{h.KinIndex}) - {h.Value}", 12, UiFactory.AccentGold);
+                        UiFactory.SetLayout(l.gameObject, prefH: 18f);
+                    }
+                    foreach (var a in s.KinActiveTop)
+                    {
+                        var l = UiFactory.CreateText(_kinTopContent, $"[活跃#{a.Order}] {a.Name} (ID:{a.KinIndex}) - {a.Value}", 12, UiFactory.AccentCeladon);
+                        UiFactory.SetLayout(l.gameObject, prefH: 18f);
+                    }
                 }
             }
 

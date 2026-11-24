@@ -26,7 +26,9 @@ namespace Qqtang.Core.Tests
                 TestQqTeaRoundTrip();
                 TestUdpChecksumAndRoundTrip();
                 TestGameplayBatchRoundTrip();
+                TestPhase4CodecsAndProgression();
                 TestRule1SimulationMechanics();
+                TestAuthenticBattleItemsAndTransformations();
                 TestOfflineSoloAiAndBossMechanics();
                 TestStaticCatalogs();
                 TestRealMapFileIfPresent();
@@ -159,14 +161,14 @@ namespace Qqtang.Core.Tests
             Assert(sim.Bombs.Count == 0 && sim.Flames.Count > 0, "Bomb should detonate into flames");
             Assert(sim.OutgoingTcpEvents.Any(e => e.schemaId == GameEventSchemas.NotifyBombExplode), "Should emit NotifyBombExplode");
 
-            // Test extended mechanics: Needle self-rescue (63), Shield (41), Remote Relive (0x0FBA), Emotion (0x1194)
+            // Test extended mechanics: Needle self-rescue (63), Field Trap (41), Remote Relive (0x0FBA), Emotion (0x1194)
             sim.LocalActor.State = ActorLifeState.Trapped;
             sim.LocalActor.NeedleCount = 1;
             Assert(sim.TryUseWorldItem(63), "Needle self-rescue should succeed");
             Assert(sim.LocalActor.State == ActorLifeState.Active && sim.LocalActor.NeedleCount == 0, "Actor should be active after needle");
-            sim.LocalActor.ShieldCount = 1;
-            Assert(sim.TryUseWorldItem(41), "Shield activation should succeed");
-            Assert(sim.LocalActor.IsInvulnerable(sim.ElapsedMs), "Actor should be invulnerable while shield active");
+            sim.LocalActor.TrapCount = 1;
+            Assert(sim.TryUseWorldItem(41), "Capture Trap placement should succeed");
+            Assert(sim.FieldObjects.Count == 1 && sim.FieldObjects[0].ActionId == 41, "Field trap 41 should be placed on grid");
             sim.TriggerLocalEmotion(1000001, 5);
             Assert(sim.LocalActor.ActiveEmotionId == 5, "Emotion ID should be set");
             var reliveBody = new PlayerReliveEventData { PlayerId = 2, ClientTime = sim.ElapsedMs, Row = 1, Col = 1 }.Marshal();
@@ -174,7 +176,122 @@ namespace Qqtang.Core.Tests
             sim.ApplyRemoteMessage(2, ExtendedGameEventSchemas.NotifyPlayerRelive, reliveBody);
             Assert(sim.GetActor(2).State == ActorLifeState.Active, "Remote relive should revive actor");
 
-            Pass("Rule-1 BattleSimulation (move, bomb, fuse, blast, needle, shield, relive, emote)");
+            Pass("Rule-1 BattleSimulation (move, bomb, fuse, blast, needle, trap, relive, emote)");
+        }
+
+        private static void TestPhase4CodecsAndProgression()
+        {
+            var rec = AvatarRecoveryEventData.Parse(new AvatarRecoveryEventData { PlayerId = 2, Time = 9999, PosX = 140, PosY = 220 }.Marshal());
+            Assert(rec.PlayerId == 2 && rec.Time == 9999 && rec.PosX == 140 && rec.PosY == 220, "AvatarRecovery roundtrip mismatch");
+
+            var dbIn = new DispatchBombEventData { PlayerId = 1, Time = 5000 };
+            dbIn.Bombs.Add((101u, 2, 3, 4));
+            dbIn.Items.Add((24u, 5, 6));
+            var dbOut = DispatchBombEventData.Parse(dbIn.Marshal());
+            Assert(dbOut.Bombs.Count == 1 && dbOut.Bombs[0].row == 3 && dbOut.Items.Count == 1 && dbOut.Items[0].itemId == 24, "DispatchBomb roundtrip mismatch");
+
+            var ieIn = new ItemsExplodedEventData { PlayerId = 1, Time = 5100 };
+            ieIn.Items.Add((1u, 2, 3));
+            var ieOut = ItemsExplodedEventData.Parse(ieIn.Marshal());
+            Assert(ieOut.Items.Count == 1 && ieOut.Items[0].itemId == 1, "ItemsExploded roundtrip mismatch");
+
+            var eat = EatBombActionData.Parse(new EatBombActionData { PlayerId = 1, Time = 123, BombPlayerId = 2, BombRow = 4, BombCol = 5 }.Marshal());
+            Assert(eat.PlayerId == 1 && eat.BombRow == 4 && eat.BombCol == 5, "EatBomb roundtrip mismatch");
+
+            var pfpRaw = new PassiveFunctionProjectionData { Rule = 2, PlayerId = 3, Effects = PassiveFunctionEffectMask.SwordArc | PassiveFunctionEffectMask.KickImpact, Reset = true }.Marshal();
+            Assert(PassiveFunctionProjectionData.IsProjectionBody(pfpRaw), "FE Q F magic detection failed");
+            var pfp = PassiveFunctionProjectionData.Parse(pfpRaw);
+            Assert(pfp.Reset && pfp.PlayerId == 3 && (pfp.Effects & PassiveFunctionEffectMask.SwordArc) != 0, "PassiveFunctionProjection roundtrip mismatch");
+
+            var kick = KickBombActionData.Parse(new KickBombActionData { FromRow = 2, FromCol = 3, DestRow = 2, DestCol = 7, Direction = 0, PlayerId = 1, BombPower = 3 }.Marshal());
+            Assert(kick.FromRow == 2 && kick.FromCol == 3 && kick.DestCol == 7 && kick.BombPower == 3, "KickBombAction roundtrip mismatch");
+
+            var prod = ProduceItemEventData.Parse(new ProduceItemEventData { Row = 4, Col = 9, ItemId = 85 }.Marshal());
+            Assert(prod.Row == 4 && prod.Col == 9 && prod.ItemId == 85, "ProduceItem roundtrip mismatch");
+
+            var wr = WrestleActionEventData.Parse(new WrestleActionEventData { SkillType = 2, FirstTeam = 1, PlayerPos = 3, PlayerId = 2, Time = 8888 }.Marshal());
+            Assert(wr.SkillType == 2 && wr.PlayerId == 2, "WrestleAction roundtrip mismatch");
+
+            var npcDrop = new NpcDropItemEventData { ObjectId = 30001, PosX = 100, PosY = 120 };
+            npcDrop.Items.Add((83u, 3, 4));
+            var npcDropOut = NpcDropItemEventData.Parse(npcDrop.Marshal());
+            Assert(npcDropOut.ObjectId == 30001 && npcDropOut.Items.Count == 1 && npcDropOut.Items[0].itemId == 83, "NpcDropItem roundtrip mismatch");
+
+            var tankHp = TankBaseHpEventData.Parse(new TankBaseHpEventData { PlayerId = 1, Time = 7000, TeamId = 2, ChangeHp = -250 }.Marshal());
+            Assert(tankHp.TeamId == 2 && tankHp.ChangeHp == -250, "TankBaseHp roundtrip mismatch");
+
+            // Exact 180-tier competitive & 31-tier adventure progression math
+            var r0 = StaticCatalogs.GetCompetitiveRankInfo(0);
+            var r6 = StaticCatalogs.GetCompetitiveRankInfo(10000);
+            var a5 = StaticCatalogs.GetAdventureRankInfo(8000);
+            Assert(r0.degree == 1 && r6.degree == 7 && a5.level == 5, $"Progression mismatch: r0={r0.degree} r6={r6.degree} a5={a5.level}");
+
+            Pass("Phase 4 Protocol Codecs (0x0FBF/0x10E0-0x10E3/0x1159-0x116B/0x15B3) & 180-Tier/30-Tier Progression");
+        }
+
+        private static void TestAuthenticBattleItemsAndTransformations()
+        {
+            var map = MapDataLoader.BuildFallbackArena(201);
+            var begin = new GameBeginData
+            {
+                GameId = 77, MapId = 201, SpawnSeed = 111, ItemSeed = 222, ArbitratorPlayerId = 1, GameTimeMs = 180_000,
+                Players = new List<PlayerGameInfoData>
+                {
+                    new PlayerGameInfoData { PlayerId = 1, RoleId = 1, TeamId = 1 },
+                    new PlayerGameInfoData { PlayerId = 2, RoleId = 2, TeamId = 2 }
+                }
+            };
+            var sim = new Rule1BattleSimulation { IsOfflineSoloMode = true };
+            sim.Initialize(begin, map, 1, false);
+            sim.Step(3000, BattleDirection.None, false);
+
+            // 1. Place Banana (42) & Glue (43) and verify contacts on actor 2
+            var p1 = sim.LocalActor;
+            var p2 = sim.GetActor(2);
+            p1.GrantHeldAction(42, 1);
+            p1.GrantHeldAction(43, 1);
+            GridCell bananaCell = p1.CurrentCell;
+            Assert(sim.TryUseWorldItem(42), "Banana placement should succeed");
+            p2.PosX = bananaCell.Col * 40 + 20;
+            p2.PosY = bananaCell.Row * 40 + 20;
+            sim.Step(25, BattleDirection.None, false);
+            Assert(p2.MovementStatus == MovementStatusKind.ForcedSlide, "Stepping on banana 42 must trigger ForcedSlide");
+
+            // 2. Dart (44) projectile targeting active bomb 2 cells away in facing ray
+            p1.Facing = BattleDirection.Right;
+            p1.GrantHeldAction(44, 1);
+            for (int dc = 1; dc <= 2; dc++)
+            {
+                int cc = Math.Min(map.Width - 1, p1.CurrentCell.Col + dc);
+                var openTile = sim.Map.GetCell(p1.CurrentCell.Row, cc);
+                openTile.Collision = CellCollision.Open;
+                openTile.FlamePassable = true;
+                sim.Map.Cells[p1.CurrentCell.Row * map.Width + cc] = openTile;
+            }
+            GridCell bombCell = new GridCell(p1.CurrentCell.Row, Math.Min(map.Width - 1, p1.CurrentCell.Col + 2));
+            sim.Bombs.Add(new ActiveBomb { BombId = 500, OwnerId = 2, Cell = bombCell, Power = 1, PlacedAtMs = sim.ElapsedMs, ExplodeAtMs = sim.ElapsedMs + 3000 });
+            Assert(sim.TryUseWorldItem(44) && sim.Projectiles.Count == 1, "Dart 44 should launch projectile toward bomb");
+            sim.Step(1025, BattleDirection.None, false);
+            Assert(sim.Projectiles.Count == 0 && sim.Bombs.Count == 0, "Dart projectile should detonate target bomb after 1000ms");
+
+            // 3. Transformation 115 (Axe Gang -> grants 9 axes) & 110 (Demon -> reversed controls) + 30s expiry + 3s protection
+            sim.Pickups.Add(new FieldPickup { SceneId = 115, Cell = p1.CurrentCell, Hidden = false });
+            sim.Step(25, BattleDirection.None, false);
+            Assert(p1.IsTransformed && p1.TransformationSceneId == 115 && p1.AxeCount == 9, "Transformation 115 must grant 9 axes");
+            sim.Step(30_050, BattleDirection.None, false);
+            Assert(!p1.IsTransformed && p1.AxeCount == 0 && p1.IsInvulnerable(sim.ElapsedMs), "Transformation expiry must strip axes and grant 3s protection");
+
+            // 4. Arbitrator failover (0x0FB1) + TankBaseHp (0x15B3) + BossRaid / Sculpture offline scenarios
+            var arbBuf = new BigEndianBuffer(2); arbBuf.WriteUInt16(2);
+            sim.ApplyRemoteMessage(0, ModeEventSchemas.NotifyChangeArbitrator, arbBuf.ToArray());
+            Assert(sim.ArbitratorPlayerId == 2, "Arbitrator should update to P2");
+            sim.ApplyRemoteMessage(0, ModeEventSchemas.RequestTankBaseHp, new TankBaseHpEventData { PlayerId = 1, Time = sim.ElapsedMs, TeamId = 2, ChangeHp = -250 }.Marshal());
+            Assert(sim.TankBaseHpByTeam[2] == 750, $"Expected TankBaseHp 750, got {sim.TankBaseHpByTeam[2]}");
+
+            sim.ConfigureOfflineScenario(OfflinePracticeMode.BossRaid);
+            Assert(sim.Bosses.Count == 1 && sim.Bosses[0].Hp == 2500, "BossRaid offline scenario should spawn 2500 HP boss");
+
+            Pass("Authentic Battle Items (Trap/Banana/Glue/Dart/Transformations/Arbitrator/TankBase/OfflineBoss)");
         }
 
         private static void TestOfflineSoloAiAndBossMechanics()
@@ -555,13 +672,19 @@ namespace Qqtang.Core.Tests
                 await c1.LeaveRoomAsync(roomId);
                 Pass($"Live Room Extended (RoomChat, SeatLock, ModifyRoom, ChatRoom+Bg={bgs.BackgroundIds.Count}, Kick, QuickJoin)");
 
-                // 9. Live Lobby PlayerList + SectionChat
+                // 9. Live Lobby PlayerList + SectionChat + AcrossSectionChat (0x006C/0x0095) + ConfigFileCheck (0x0266)
                 var pList = await c1.RefreshPlayerListAsync();
                 Assert(pList.ResultId == 0 && pList.Players.Count >= 2, $"PlayerList expected >=2, got {pList.Players.Count}");
                 Assert(await c1.SendSectionChatAsync("HelloLobby") == 0, "SectionChat failed");
                 var sChat = await WaitForCommandAsync(c2, ExtendedGameCommands.SectionChatNotify, p => SectionChatNotifyData.Parse(p.Payload));
                 Assert(sChat.Content == "HelloLobby", $"SectionChat mismatch: {sChat.Content}");
-                Pass($"Live Lobby Extended (PlayerList={pList.Players.Count}, SectionChat)");
+                var cfgCount = await c1.CheckConfigFilesAsync();
+                Assert(cfgCount == 0, $"ConfigFileCheck expected 0 outdated files, got {cfgCount}");
+                var acrossRes = await c1.SendAcrossSectionChatAsync("HelloAcross", c2.Uin);
+                Assert(acrossRes.ResultId == 0 && acrossRes.DestinationUin == c2.Uin, $"AcrossSectionChat failed: {acrossRes.ResultId}");
+                var acrossPush = await WaitForCommandAsync(c2, ExtendedGameCommands.AcrossSectionChatNotify, p => AcrossSectionChatNotifyData.Parse(p.Payload));
+                Assert(acrossPush.Content == "HelloAcross" && acrossPush.SourceUin == c1.Uin, $"AcrossSectionChatNotify mismatch: {acrossPush.Content}");
+                Pass($"Live Lobby Extended (PlayerList={pList.Players.Count}, SectionChat, CrossWhisper, ConfigCheck)");
 
                 // 10. Live Economy + Shop (auxiliary port) + BreakEgg + Pets
                 var money = await c1.GetGameMoneyAsync();
@@ -617,6 +740,12 @@ namespace Qqtang.Core.Tests
                 Assert(declRes.Result == 0, $"SetKinDeclaration failed: {declRes.Result}");
                 var notifRes = await c1.SetKinNotificationAsync(kinCreate.KinIndex, "WelcomeAll");
                 Assert(notifRes.Result == 0, $"SetKinNotification failed: {notifRes.Result}");
+                var badgeRes = await c1.SetKinBadgeAsync(kinCreate.KinIndex, 7);
+                Assert(badgeRes.Result == 0 && badgeRes.BadgeId == 7, $"SetKinBadge failed: res={badgeRes.Result}");
+                var authUp = await c1.AssignKinAuthorityAsync(kinCreate.KinIndex, c2.Uin, 6);
+                Assert(authUp.Result == 0 && authUp.AuthorityId == 6, $"AssignKinAuthority promote 4->6 failed: res={authUp.Result} {authUp.Reason}");
+                var authDown = await c1.AssignKinAuthorityAsync(kinCreate.KinIndex, c2.Uin, 4);
+                Assert(authDown.Result == 0 && authDown.AuthorityId == 4, $"AssignKinAuthority demote 6->4 failed: res={authDown.Result} {authDown.Reason}");
                 await c1.SendKinChatAsync(kinCreate.KinIndex, "HelloKin");
                 var kChat = await WaitForCommandAsync(c2, ExtendedGameCommands.KinChatNotify, p => KinChatNotifyData.Parse(p.Payload));
                 Assert(kChat.Message == "HelloKin", $"KinChat peer mismatch: {kChat.Message}");
@@ -626,7 +755,7 @@ namespace Qqtang.Core.Tests
                 Assert(kickMember.Result == 0, $"KickKinMember failed: {kickMember.Result}");
                 var dismissRes = await c1.DismissKinAsync(kinCreate.KinIndex);
                 Assert(dismissRes.Result == 0, $"DismissKin failed: {dismissRes.Result}");
-                Pass($"Live Kin Full Flow (Create#{kinCreate.KinIndex}, Invite->Join, 2 Members, Decl, Notif, PeerChat, Top, Kick, Dismiss)");
+                Pass($"Live Kin Full Flow (Create#{kinCreate.KinIndex}, Invite->Join, 2 Members, Decl, Notif, Badge=7, Auth=4->6->4, PeerChat, Top, Kick, Dismiss)");
 
                 // 13. Live Marriage + Wedding Ceremony (ChatRoom Bg=5 + ChangeWeddingMode + StartWedding + AnswerWedding + Divorce)
                 var mInit = await c1.GetMarriageInfoAsync();

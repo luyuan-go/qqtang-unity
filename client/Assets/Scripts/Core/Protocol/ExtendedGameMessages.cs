@@ -64,6 +64,7 @@ namespace Qqtang.Core.Protocol
         public const ushort SetKinDeclaration = 0x0140;
         public const ushort SetKinNotification = 0x0141;
         public const ushort ShopBuy = 0x0259;
+        public const ushort GetConfigFile = 0x0266;
         public const ushort Forge = 0x0353;
         public const ushort ShopList = 0x035E;
     }
@@ -994,6 +995,8 @@ namespace Qqtang.Core.Protocol
         public uint DismissUnix;
         public uint Status;
         public uint Grade;
+        public uint FlagIndex;
+        public uint FlagId;
         public ushort MemberCount;
         public string Name = string.Empty;
         public string Declaration = string.Empty;
@@ -1016,7 +1019,8 @@ namespace Qqtang.Core.Protocol
                 Status = r.ReadUInt32(),
                 Grade = r.ReadUInt32()
             };
-            r.Skip(8); // FlagID
+            k.FlagIndex = r.ReadUInt32();
+            k.FlagId = r.ReadUInt32();
             k.MemberCount = r.ReadUInt16();
             ushort declLen = r.ReadUInt16();
             ushort titleLen = r.ReadUInt16();
@@ -2173,6 +2177,117 @@ namespace Qqtang.Core.Protocol
             b.WriteUInt32(targetUin);
             b.WriteUInt16((ushort)(accepted ? 0 : 1));
             return b.ToArray();
+        }
+
+        public static byte[] BuildAssignKinAuthorityPayload(uint kinIndex, uint uin, uint time, uint dstUin, uint authorityId)
+        {
+            var b = new BigEndianBuffer(20);
+            b.WriteUInt32(kinIndex);
+            b.WriteUInt32(uin);
+            b.WriteUInt32(time);
+            b.WriteUInt32(dstUin);
+            b.WriteUInt32(authorityId);
+            return b.ToArray();
+        }
+
+        public static byte[] BuildSetKinBadgePayload(uint kinIndex, uint uin, uint time, uint badgeId, uint definedBadgeId = 0)
+        {
+            var b = new BigEndianBuffer(20);
+            b.WriteUInt32(kinIndex);
+            b.WriteUInt32(uin);
+            b.WriteUInt32(time);
+            b.WriteUInt32(badgeId);
+            b.WriteUInt32(definedBadgeId);
+            return b.ToArray();
+        }
+
+        public static byte[] BuildUpdateKinTitlePayload(uint uin, uint time, uint kinIndex, string title)
+        {
+            byte[] text = LegacyTextEncoding.EncodeSlot(title, 200);
+            var b = new BigEndianBuffer(14 + text.Length);
+            b.WriteUInt32(uin);
+            b.WriteUInt32(time);
+            b.WriteUInt32(kinIndex);
+            b.WriteUInt16((ushort)text.Length);
+            b.WriteBytes(text);
+            return b.ToArray();
+        }
+
+        public static byte[] BuildGetConfigFilePayload(uint uin, uint time)
+        {
+            var b = new BigEndianBuffer(12);
+            b.WriteUInt32(uin);
+            b.WriteUInt32(time);
+            b.WriteUInt32(0); // 0 reports -> server responds with 0-count current status
+            return b.ToArray();
+        }
+    }
+
+    public sealed class KinBadgeResultData
+    {
+        public ushort Result;
+        public uint KinIndex;
+        public uint Uin;
+        public uint BadgeId;
+        public uint DefinedBadgeId;
+
+        public static KinBadgeResultData Parse(byte[] payload)
+        {
+            var r = new BigEndianReader(payload);
+            return new KinBadgeResultData
+            {
+                Result = r.ReadUInt16(),
+                KinIndex = r.ReadUInt32(),
+                Uin = r.ReadUInt32(),
+                BadgeId = r.ReadUInt32(),
+                DefinedBadgeId = r.ReadUInt32()
+            };
+        }
+    }
+
+    public sealed class KinAuthorityResultData
+    {
+        public ushort Result;
+        public uint KinIndex;
+        public uint Uin;
+        public uint DstUin;
+        public uint AuthorityId;
+        public string Reason = string.Empty;
+
+        public static KinAuthorityResultData Parse(byte[] payload)
+        {
+            var r = new BigEndianReader(payload);
+            var d = new KinAuthorityResultData
+            {
+                Result = r.ReadUInt16(),
+                KinIndex = r.ReadUInt32(),
+                Uin = r.ReadUInt32(),
+                DstUin = r.ReadUInt32(),
+                AuthorityId = r.ReadUInt32()
+            };
+            if (r.Remaining >= 2)
+            {
+                ushort len = r.ReadUInt16();
+                if (len > 0 && r.Remaining >= len)
+                    d.Reason = LegacyTextEncoding.DecodeNullTerminated(r.ReadBytes(len));
+            }
+            return d;
+        }
+    }
+
+    public sealed class AcrossSectionChatResponseData
+    {
+        public ushort ResultId;
+        public uint DestinationUin;
+
+        public static AcrossSectionChatResponseData Parse(byte[] payload)
+        {
+            var r = new BigEndianReader(payload);
+            return new AcrossSectionChatResponseData
+            {
+                ResultId = r.ReadUInt16(),
+                DestinationUin = r.Remaining >= 4 ? r.ReadUInt32() : 0
+            };
         }
     }
 }

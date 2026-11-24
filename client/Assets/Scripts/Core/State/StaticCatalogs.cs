@@ -82,6 +82,75 @@ namespace Qqtang.Core.State
             "月亮王子", "太阳国王", "紫钻皇帝", "酷比大天使", "创世之神", "无上真人"
         };
 
+        // Exact 180-step competitivePointThresholds from server/internal/protocol/game/progression.go
+        private static readonly uint[] CompetitivePointThresholds =
+        {
+            0, 1000, 2000, 3000, 4000, 5000, 10000, 12000, 14000, 16000, 18000, 20000,
+            30000, 33000, 36000, 39000, 42000, 45000, 60000, 64000, 68000, 72000, 76000,
+            80000, 100000, 105000, 110000, 115000, 120000, 125000, 150000, 156000, 162000,
+            168000, 174000, 180000, 210000, 217000, 224000, 231000, 238000, 245000, 280000,
+            288000, 296000, 304000, 312000, 320000, 360000, 369000, 378000, 387000, 396000,
+            405000, 450000, 460000, 470000, 480000, 490000, 500000, 550000, 565000, 580000,
+            595000, 610000, 625000, 700000, 720000, 740000, 760000, 780000, 800000, 900000,
+            925000, 950000, 975000, 1000000, 1025000, 1150000, 1180000, 1210000, 1240000,
+            1270000, 1300000, 1450000, 1485000, 1520000, 1555000, 1590000, 1625000, 1800000,
+            1840000, 1880000, 1920000, 1960000, 2000000, 2200000, 2245000, 2290000, 2335000,
+            2380000, 2425000, 2650000, 2700000, 2750000, 2800000, 2850000, 2900000, 3150000,
+            3205000, 3260000, 3315000, 3370000, 3425000, 3700000, 3760000, 3820000, 3880000,
+            3940000, 4000000, 4300000, 4370000, 4440000, 4510000, 4580000, 4650000, 5000000,
+            5090000, 5180000, 5270000, 5360000, 5450000, 5900000, 6020000, 6140000, 6260000,
+            6380000, 6500000, 7100000, 7260000, 7420000, 7580000, 7740000, 7900000, 8700000,
+            8910000, 9120000, 9330000, 9540000, 9750000, 10800000, 11070000, 11340000,
+            11610000, 11880000, 12150000, 13500000, 14685000, 15870000, 17055000, 18240000,
+            19425000, 25350000, 29145000, 32940000, 36735000, 40530000, 44325000, 63300000,
+            71380000, 79460000, 87540000, 95620000, 103700000, 144100000, 292805000, 441510000,
+            590515000, 738920000, 887625000, 1631150000
+        };
+
+        // Exact 31-level adventurePointThresholds (Lv.0..30) from server/internal/protocol/game/progression.go
+        private static readonly uint[] AdventurePointThresholds =
+        {
+            0, 573, 1289, 2447, 4481, 7952, 20000, 36100, 60000, 96000, 154000, 231000,
+            323401, 431858, 565350, 790000, 1040000, 1430000, 1880000, 2420000, 3010000,
+            5322310, 9070163, 15066729, 24661235, 40012444, 64574378, 103873473,
+            166752024, 267357707, 428326799
+        };
+
+        public static (ushort degree, string title, uint minPoints, uint nextPoints, float progress) GetCompetitiveRankInfo(uint points)
+        {
+            int idx = CompetitivePointThresholds.Length - 2;
+            for (int d = 1; d < CompetitivePointThresholds.Length; d++)
+            {
+                if (points < CompetitivePointThresholds[d])
+                {
+                    idx = d - 1;
+                    break;
+                }
+            }
+            ushort degree = (ushort)(idx + 1);
+            uint minP = CompetitivePointThresholds[idx];
+            uint nextP = idx + 1 < CompetitivePointThresholds.Length ? CompetitivePointThresholds[idx + 1] : minP;
+            float prog = nextP > minP ? Math.Min(1f, Math.Max(0f, (float)(points - minP) / (nextP - minP))) : 1f;
+            return (degree, GetRankTitle(degree), minP, nextP, prog);
+        }
+
+        public static (byte level, uint minPoints, uint nextPoints, float progress) GetAdventureRankInfo(uint extPoint)
+        {
+            int idx = AdventurePointThresholds.Length - 1;
+            for (int lv = 1; lv < AdventurePointThresholds.Length; lv++)
+            {
+                if (extPoint < AdventurePointThresholds[lv])
+                {
+                    idx = lv - 1;
+                    break;
+                }
+            }
+            uint minP = AdventurePointThresholds[idx];
+            uint nextP = idx + 1 < AdventurePointThresholds.Length ? AdventurePointThresholds[idx + 1] : minP;
+            float prog = nextP > minP ? Math.Min(1f, Math.Max(0f, (float)(extPoint - minP) / (nextP - minP))) : 1f;
+            return ((byte)idx, minP, nextP, prog);
+        }
+
         public static readonly RoleInfoEntry[] Roles =
         {
             new RoleInfoEntry { RoleId = 1,  DaoistName = "清微童子", ClassicName = "小乖", BaseSpeed = 5, BaseBombs = 1, BasePower = 2 },

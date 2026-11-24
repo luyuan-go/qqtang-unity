@@ -30,6 +30,13 @@ namespace Qqtang.UnityClient
         private readonly List<GameObject> _pooledBombs = new List<GameObject>();
         private readonly List<GameObject> _pooledFlames = new List<GameObject>();
         private readonly List<GameObject> _pooledPickups = new List<GameObject>();
+        private readonly List<GameObject> _pooledFieldObjects = new List<GameObject>();
+        private readonly List<GameObject> _pooledProjectiles = new List<GameObject>();
+        private GameObject _offlineBunOrb;
+        private GameObject _localPetOrb;
+        private GameObject _basePillar1;
+        private GameObject _basePillar2;
+        public bool HasActivePet { get; set; }
 
         private Vector3 _baseCameraPos;
         private Vector3 _cameraLookTarget;
@@ -399,6 +406,17 @@ namespace Qqtang.UnityClient
                 {
                     float walkBob = actor.Moving ? Mathf.Abs(Mathf.Sin(Time.time * 12f)) * 0.10f : 0f;
                     vis.SpriteTransform.localPosition = new Vector3(0f, 0.08f + walkBob, 0f);
+                    float scale = actor.IsTransformed ? 1.18f : 1.0f;
+                    vis.SpriteTransform.localScale = Vector3.one * scale;
+                }
+                if (vis.Body != null)
+                {
+                    if (actor.TransformationSceneId == 104) vis.Body.color = new Color(0.75f, 0.95f, 1f, 0.72f); // Flying Duck ghost
+                    else if (actor.TransformationSceneId == 110) vis.Body.color = new Color(0.95f, 0.45f, 0.95f, 1f); // Reverse Demon
+                    else if (actor.IsTransformed) vis.Body.color = new Color(1f, 0.92f, 0.55f, 1f);
+                    else if (actor.MovementStatus == MovementStatusKind.Slow) vis.Body.color = new Color(0.55f, 0.85f, 1f, 1f);
+                    else if (actor.MovementStatus == MovementStatusKind.ForcedSlide) vis.Body.color = new Color(1f, 1f, 0.6f, 1f);
+                    else vis.Body.color = Color.white;
                 }
 
                 if (vis.LastDir != actor.Facing)
@@ -406,6 +424,30 @@ namespace Qqtang.UnityClient
                     vis.LastDir = actor.Facing;
                     vis.Body.sprite = _art.GetCharacterSprite(vis.RoleId, DirectionSuffix(actor.Facing), TeamColor(actor.TeamId));
                 }
+            }
+
+            // 2b. Active Pet Companion orbiting behind local player
+            if (HasActivePet && sim.LocalActor != null && sim.LocalActor.State != ActorLifeState.Dead)
+            {
+                if (_localPetOrb == null)
+                {
+                    _localPetOrb = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                    _localPetOrb.name = "ActivePetCompanion";
+                    _localPetOrb.transform.SetParent(_dynamicRoot, false);
+                    _localPetOrb.transform.localScale = Vector3.one * 0.34f;
+                    Destroy(_localPetOrb.GetComponent<Collider>());
+                    var pMat = new Material(Shader.Find("Sprites/Default"));
+                    pMat.color = new Color(0.45f, 0.95f, 0.82f, 0.92f);
+                    _localPetOrb.GetComponent<MeshRenderer>().sharedMaterial = pMat;
+                }
+                _localPetOrb.SetActive(true);
+                float ang = Time.time * 2.4f;
+                Vector3 hostPos = PixelToWorld(sim.LocalActor.PosX, sim.LocalActor.PosY, 0.58f + 0.08f * Mathf.Sin(Time.time * 5f));
+                _localPetOrb.transform.position = hostPos + new Vector3(Mathf.Cos(ang) * 0.52f, 0f, Mathf.Sin(ang) * 0.52f);
+            }
+            else if (_localPetOrb != null)
+            {
+                _localPetOrb.SetActive(false);
             }
 
             // 3. Sync bombs
@@ -471,7 +513,103 @@ namespace Qqtang.UnityClient
                 bVis.HpFill.localScale = new Vector3(1.04f * ratio, 0.08f, 0.06f);
             }
 
+            // 7. Sync placed Field Objects (41=Trap crimson, 42=Banana yellow, 43=Glue cyan)
+            EnsurePool(_pooledFieldObjects, sim.FieldObjects.Count, "FieldObj", () =>
+            {
+                var disc = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+                disc.name = "FieldObject";
+                disc.transform.SetParent(_dynamicRoot, false);
+                disc.transform.localScale = new Vector3(0.66f, 0.05f, 0.66f);
+                Destroy(disc.GetComponent<Collider>());
+                disc.GetComponent<MeshRenderer>().material = new Material(Shader.Find("Sprites/Default"));
+                return disc;
+            });
+            for (int i = 0; i < _pooledFieldObjects.Count; i++)
+            {
+                bool active = i < sim.FieldObjects.Count;
+                _pooledFieldObjects[i].SetActive(active);
+                if (!active) continue;
+                var fo = sim.FieldObjects[i];
+                _pooledFieldObjects[i].transform.position = CellToWorld(fo.Cell.Row, fo.Cell.Col, 0.05f);
+                var mr = _pooledFieldObjects[i].GetComponent<MeshRenderer>();
+                mr.material.color = fo.ActionId == 41 ? new Color(0.88f, 0.16f, 0.18f, 0.9f)
+                    : (fo.ActionId == 42 ? new Color(0.98f, 0.84f, 0.16f, 0.92f) : new Color(0.20f, 0.78f, 0.88f, 0.85f));
+            }
+
+            // 8. Sync flying Action Projectiles (44=Dart, 46=Axe)
+            EnsurePool(_pooledProjectiles, sim.Projectiles.Count, "Proj", () =>
+            {
+                var orb = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                orb.name = "ActionProjectile";
+                orb.transform.SetParent(_dynamicRoot, false);
+                orb.transform.localScale = Vector3.one * 0.28f;
+                Destroy(orb.GetComponent<Collider>());
+                orb.GetComponent<MeshRenderer>().material = new Material(Shader.Find("Sprites/Default"));
+                return orb;
+            });
+            for (int i = 0; i < _pooledProjectiles.Count; i++)
+            {
+                bool active = i < sim.Projectiles.Count;
+                _pooledProjectiles[i].SetActive(active);
+                if (!active) continue;
+                var pr = sim.Projectiles[i];
+                float dur = Mathf.Max(1f, pr.ResolveAtMs - pr.CreatedAtMs);
+                float t = Mathf.Clamp01((sim.ElapsedMs - pr.CreatedAtMs) / dur);
+                Vector3 p0 = CellToWorld(pr.StartCell.Row, pr.StartCell.Col, 0.55f);
+                Vector3 p1 = CellToWorld(pr.TargetCell.Row, pr.TargetCell.Col, 0.55f);
+                _pooledProjectiles[i].transform.position = Vector3.Lerp(p0, p1, t);
+                _pooledProjectiles[i].GetComponent<MeshRenderer>().material.color = pr.ActionId == 46
+                    ? new Color(0.95f, 0.28f, 0.18f, 1f) : new Color(0.88f, 0.94f, 1f, 1f);
+            }
+
+            // 9. Offline Bun Objective center orb & Tank/Sculpture Base pillars
+            bool showBun = sim.IsOfflineSoloMode && sim.OfflineMode == OfflinePracticeMode.BunCapture && sim.BunCarrierPlayerId == 0;
+            if (showBun)
+            {
+                if (_offlineBunOrb == null)
+                {
+                    _offlineBunOrb = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                    _offlineBunOrb.name = "OfflineBunOrb";
+                    _offlineBunOrb.transform.SetParent(_dynamicRoot, false);
+                    _offlineBunOrb.transform.localScale = new Vector3(0.55f, 0.42f, 0.55f);
+                    Destroy(_offlineBunOrb.GetComponent<Collider>());
+                    var bm = new Material(Shader.Find("Sprites/Default"));
+                    bm.color = new Color(1f, 0.88f, 0.36f, 0.96f);
+                    _offlineBunOrb.GetComponent<MeshRenderer>().sharedMaterial = bm;
+                }
+                _offlineBunOrb.SetActive(true);
+                _offlineBunOrb.transform.position = CellToWorld(sim.OfflineBunCell.Row, sim.OfflineBunCell.Col, 0.35f + 0.08f * Mathf.Sin(Time.time * 4f));
+            }
+            else if (_offlineBunOrb != null)
+            {
+                _offlineBunOrb.SetActive(false);
+            }
+
+            if (sim.TankBaseHpByTeam.Count > 0)
+            {
+                SyncBasePillar(ref _basePillar1, 1, 1, new Color(0.92f, 0.30f, 0.26f), sim.TankBaseHpByTeam.TryGetValue(1, out int hp1) ? hp1 : 0);
+                SyncBasePillar(ref _basePillar2, _height - 2, _width - 2, new Color(0.24f, 0.56f, 0.96f), sim.TankBaseHpByTeam.TryGetValue(2, out int hp2) ? hp2 : 0);
+            }
+
             ApplyCameraTransform();
+        }
+
+        private void SyncBasePillar(ref GameObject pillar, int row, int col, Color color, int hp)
+        {
+            if (pillar == null)
+            {
+                pillar = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+                pillar.name = $"BasePillar_{row}_{col}";
+                pillar.transform.SetParent(_dynamicRoot, false);
+                Destroy(pillar.GetComponent<Collider>());
+                var mat = new Material(Shader.Find("Sprites/Default"));
+                mat.color = color;
+                pillar.GetComponent<MeshRenderer>().sharedMaterial = mat;
+            }
+            pillar.SetActive(hp > 0);
+            float h = Mathf.Clamp(hp / 1000f, 0.12f, 1f) * 1.1f;
+            pillar.transform.localScale = new Vector3(0.75f, h * 0.5f, 0.75f);
+            pillar.transform.position = CellToWorld(row, col, h * 0.5f);
         }
 
         private GameObject CreateBillboardEntity(string name, string artKey, Color fallbackColor, float scale, int sortingOrder)
@@ -504,6 +642,12 @@ namespace Qqtang.UnityClient
             _pooledBombs.Clear();
             _pooledFlames.Clear();
             _pooledPickups.Clear();
+            _pooledFieldObjects.Clear();
+            _pooledProjectiles.Clear();
+            _offlineBunOrb = null;
+            _localPetOrb = null;
+            _basePillar1 = null;
+            _basePillar2 = null;
             _blockObjects = null;
             _lastCellStates = null;
         }

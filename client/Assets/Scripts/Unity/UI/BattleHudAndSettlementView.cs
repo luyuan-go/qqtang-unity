@@ -24,6 +24,8 @@ namespace Qqtang.UnityClient.UI
         private readonly Text _localStatsText;
         private readonly Text _hotbarText;
         private readonly Text _readyBannerText;
+        private readonly Text _bossTalkBanner;
+        private readonly Button _nextStageBtn;
 
         // In-battle mini chat
         private readonly RectTransform _miniChatFeed;
@@ -69,11 +71,24 @@ namespace Qqtang.UnityClient.UI
 
             UiFactory.CreateButton(topBar, "菜单 (Esc)", TogglePause, UiFactory.AccentMuted, fontSize: 13, width: 98f, height: 32f);
 
-            // Center Ready/Go banner
+            // Center Ready/Go banner & Boss Speech banner
             _readyBannerText = UiFactory.CreateText(HudRoot, "", 42, UiFactory.AccentGold, TextAnchor.MiddleCenter, FontStyle.Bold);
             _readyBannerText.rectTransform.anchorMin = new Vector2(0.5f, 0.5f);
             _readyBannerText.rectTransform.anchorMax = new Vector2(0.5f, 0.5f);
             _readyBannerText.rectTransform.sizeDelta = new Vector2(420f, 70f);
+
+            _bossTalkBanner = UiFactory.CreateText(HudRoot, "", 16, UiFactory.AccentGold, TextAnchor.MiddleCenter, FontStyle.Bold);
+            _bossTalkBanner.rectTransform.anchorMin = new Vector2(0.5f, 1f);
+            _bossTalkBanner.rectTransform.anchorMax = new Vector2(0.5f, 1f);
+            _bossTalkBanner.rectTransform.anchoredPosition = new Vector2(0f, -72f);
+            _bossTalkBanner.rectTransform.sizeDelta = new Vector2(540f, 28f);
+            _bossTalkBanner.gameObject.SetActive(false);
+
+            _nextStageBtn = UiFactory.CreateButton(HudRoot, "进入下一关 (探险传送门)", () => _ctx.App.RequestAdventureNextMap(), UiFactory.AccentVermilion, fontSize: 15, width: 210f, height: 40f);
+            var nsRt = _nextStageBtn.GetComponent<RectTransform>();
+            nsRt.anchorMin = nsRt.anchorMax = new Vector2(0.5f, 1f);
+            nsRt.anchoredPosition = new Vector2(0f, -112f);
+            _nextStageBtn.gameObject.SetActive(false);
 
             // Bottom HUD bar
             var botBar = UiFactory.CreatePanel(HudRoot, "BottomHudBar", new Color(0.08f, 0.13f, 0.17f, 0.86f), UiFactory.BorderGold);
@@ -81,17 +96,21 @@ namespace Qqtang.UnityClient.UI
             botBar.anchorMax = new Vector2(1f, 0f);
             botBar.pivot = new Vector2(0.5f, 0f);
             botBar.sizeDelta = new Vector2(0f, 54f);
-            UiFactory.AddHLayout(botBar.gameObject, 10f, 16, 6);
+            UiFactory.AddHLayout(botBar.gameObject, 6f, 12, 6);
 
-            _localStatsText = UiFactory.CreateText(botBar, "泡泡 2/6 | 威力 2 | 速度 4", 15, UiFactory.AccentGold, FontStyle.Bold);
-            UiFactory.SetLayout(_localStatsText.gameObject, prefW: 320f, prefH: 38f);
+            _localStatsText = UiFactory.CreateText(botBar, "泡:2 威:2 速:4", 13, UiFactory.AccentGold, FontStyle.Bold);
+            UiFactory.SetLayout(_localStatsText.gameObject, prefW: 250f, prefH: 38f);
 
-            _hotbarText = UiFactory.CreateText(botBar, "[WASD] 移动  [Space] 放泡  [1] 扎针  [2] 护盾  [3] 遥控  [E] 表情", 13, UiFactory.TextLight);
+            _hotbarText = UiFactory.CreateText(botBar, "", 12, UiFactory.TextLight);
             UiFactory.SetLayout(_hotbarText.gameObject, flexW: 1f, prefH: 38f);
 
-            UiFactory.CreateButton(botBar, "扎针(1)", () => _ctx.App.TriggerBattleWorldItem(63), UiFactory.AccentCeladon, fontSize: 12, width: 70f, height: 32f);
-            UiFactory.CreateButton(botBar, "护盾(2)", () => _ctx.App.TriggerBattleWorldItem(41), UiFactory.AccentCeladon, fontSize: 12, width: 70f, height: 32f);
-            UiFactory.CreateButton(botBar, "表情(E)", () => _ctx.App.TriggerBattleEmotion(1), UiFactory.AccentMuted, fontSize: 12, width: 70f, height: 32f);
+            UiFactory.CreateButton(botBar, "针(1)", () => _ctx.App.TriggerBattleWorldItem(63), UiFactory.AccentCeladon, fontSize: 11, width: 52f, height: 30f);
+            UiFactory.CreateButton(botBar, "陷(2)", () => _ctx.App.TriggerBattleWorldItem(41), UiFactory.AccentVermilion, fontSize: 11, width: 52f, height: 30f);
+            UiFactory.CreateButton(botBar, "蕉(3)", () => _ctx.App.TriggerBattleWorldItem(42), UiFactory.AccentGold, UiFactory.TextInk, fontSize: 11, width: 52f, height: 30f);
+            UiFactory.CreateButton(botBar, "胶(4)", () => _ctx.App.TriggerBattleWorldItem(43), UiFactory.AccentCeladon, fontSize: 11, width: 52f, height: 30f);
+            UiFactory.CreateButton(botBar, "镖(5)", () => _ctx.App.TriggerBattleProjectileItem(), UiFactory.AccentMuted, fontSize: 11, width: 52f, height: 30f);
+            UiFactory.CreateButton(botBar, "遥(6)", () => _ctx.App.TriggerBattleWorldItem(64), UiFactory.AccentMuted, fontSize: 11, width: 52f, height: 30f);
+            UiFactory.CreateButton(botBar, "表(E)", () => _ctx.App.TriggerBattleEmotion(1), UiFactory.AccentMuted, fontSize: 11, width: 52f, height: 30f);
 
             // In-battle Mini Chat (bottom-left above bottom bar)
             var miniChatBox = UiFactory.CreateEmpty(HudRoot, "BattleMiniChat");
@@ -276,11 +295,20 @@ namespace Qqtang.UnityClient.UI
                 string st = a.State == ActorLifeState.Active ? "战" : (a.State == ActorLifeState.Trapped ? "泡" : "亡");
                 summary += $"[队{a.TeamId} P{a.PlayerId}:{st}] ";
             }
+            string bossSpeech = string.Empty;
             foreach (var boss in sim.Bosses)
             {
                 if (boss.Alive)
+                {
                     summary += $"| BOSS:{boss.Hp}/{boss.MaxHp} ";
+                    if (!string.IsNullOrEmpty(boss.SpeechText) && sim.ElapsedMs < boss.SpeechExpireMs)
+                        bossSpeech = $"[BOSS] {boss.SpeechText}";
+                }
             }
+            _bossTalkBanner.text = bossSpeech;
+            _bossTalkBanner.gameObject.SetActive(!string.IsNullOrEmpty(bossSpeech));
+            _nextStageBtn.gameObject.SetActive(!sim.IsOfflineSoloMode && _ctx.Store.GameType == RoomGameType.Adventure && sim.AllBossesDefeated);
+
             if (sim.BunCarrierPlayerId > 0)
             {
                 summary += $"| 包子携带:P{sim.BunCarrierPlayerId} ";
@@ -290,15 +318,30 @@ namespace Qqtang.UnityClient.UI
                 summary += "| 包子得分:";
                 foreach (var kv in sim.TeamBunScores) summary += $"队{kv.Key}={kv.Value} ";
             }
+            if (sim.TankBaseHpByTeam.Count > 0)
+            {
+                summary += "| 基地HP:";
+                foreach (var kv in sim.TankBaseHpByTeam) summary += $"队{kv.Key}={kv.Value} ";
+            }
             _participantsText.text = summary;
 
             var local = sim.LocalActor;
             if (local != null)
             {
-                string shield = local.IsInvulnerable(sim.ElapsedMs) ? " [护盾中]" : "";
-                string kick = local.CanKickBomb ? " [可踢泡]" : "";
-                _localStatsText.text = $"泡:{local.BombCapacity}/{local.MaxBombCapacity}  威:{local.BombPower}/{local.MaxBombPower}  速:{local.SpeedRate}/{local.MaxSpeedRate}{shield}{kick}";
-                _hotbarText.text = $"针×{local.NeedleCount}  护盾×{local.ShieldCount}  遥控×{local.RemoteDetonatorCount}  击杀:{local.KillCount}  救援:{local.RescueCount}";
+                string status = string.Empty;
+                if (local.IsInvulnerable(sim.ElapsedMs)) status += " [护盾]";
+                if (local.MovementStatus == MovementStatusKind.ForcedSlide) status += " [冰滑]";
+                else if (local.MovementStatus == MovementStatusKind.Slow) status += " [胶水减速]";
+                else if (local.MovementStatus == MovementStatusKind.Fast) status += " [极速]";
+                if (Rule1BattleSimulation.TryGetTransformation(local.TransformationSceneId, out var td))
+                {
+                    uint remS = local.TransformationExpiresAtMs > sim.ElapsedMs ? (local.TransformationExpiresAtMs - sim.ElapsedMs + 999) / 1000 : 0;
+                    status += $" [{td.DisplayName} {remS}s]";
+                }
+                _localStatsText.text = $"泡:{local.BombCapacity}/{local.MaxBombCapacity} 威:{local.BombPower} 速:{local.SpeedRate}{status}";
+                int projCount = local.AxeCount > 0 ? local.AxeCount : local.DartCount;
+                string projName = local.AxeCount > 0 ? "斧" : "镖";
+                _hotbarText.text = $"针×{local.NeedleCount} 陷×{local.TrapCount} 蕉×{local.BananaCount} 胶×{local.GlueCount} {projName}×{projCount} 遥×{local.RemoteDetonatorCount} | 杀:{local.KillCount} 救:{local.RescueCount} 糖:{local.MatchSugar}";
             }
 
             // Refresh mini chat feed only when message count changes
@@ -366,8 +409,11 @@ namespace Qqtang.UnityClient.UI
                     var oTxt = UiFactory.CreateText(row, outcome, 15,
                         r.Result == GameResultCode.Win ? UiFactory.AccentGold : UiFactory.TextSubtle, TextAnchor.MiddleCenter, FontStyle.Bold);
                     UiFactory.SetLayout(oTxt.gameObject, prefW: 80f, prefH: 32f);
-                    var pTxt = UiFactory.CreateText(row, $"积分 +{r.Point}  战绩:{r.Remark}", 13, UiFactory.AccentCeladon, TextAnchor.MiddleRight);
-                    UiFactory.SetLayout(pTxt.gameObject, prefW: 180f, prefH: 32f);
+                    string detail = $"积分 +{r.Point}  战绩:{r.Remark}";
+                    if (r.Fields.Count >= 3)
+                        detail = $"积分+{r.Point} | 杀:{r.Fields[0].count} 救:{r.Fields[1].count} 奖:{r.Fields[2].score}";
+                    var pTxt = UiFactory.CreateText(row, detail, 12, UiFactory.AccentCeladon, TextAnchor.MiddleRight);
+                    UiFactory.SetLayout(pTxt.gameObject, prefW: 240f, prefH: 32f);
                 }
             }
         }

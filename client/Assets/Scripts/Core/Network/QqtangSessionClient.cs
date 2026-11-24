@@ -554,6 +554,44 @@ namespace Qqtang.Core.Network
             return FetchKinTopResponseData.Parse(reply.Payload);
         }
 
+        public async Task<KinAuthorityResultData> AssignKinAuthorityAsync(uint kinIndex, uint dstUin, uint authorityId, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildAssignKinAuthorityPayload(kinIndex, Uin, NextClientTime(), dstUin, authorityId);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.AssignKinAuthority, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return KinAuthorityResultData.Parse(reply.Payload);
+        }
+
+        public async Task<KinBadgeResultData> SetKinBadgeAsync(uint kinIndex, uint badgeId, uint definedBadgeId = 0, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildSetKinBadgePayload(kinIndex, Uin, NextClientTime(), badgeId, definedBadgeId);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.SetKinBadge, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return KinBadgeResultData.Parse(reply.Payload);
+        }
+
+        public async Task<ushort> UpdateKinTitleAsync(uint kinIndex, string title, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildUpdateKinTitlePayload(Uin, NextClientTime(), kinIndex, title);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.UpdateKinTitle, 2, SectionId, payload, ct).ConfigureAwait(false);
+            var r = new BigEndianReader(reply.Payload);
+            r.ReadUInt32(); // UIN
+            return r.ReadUInt16();
+        }
+
+        public async Task<AcrossSectionChatResponseData> SendAcrossSectionChatAsync(string content, uint dstUin = 0, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildAcrossSectionChatPayload(Uin, NextClientTime(), 0, 0xFFFF, dstUin, content);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.ChatAcrossSection, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return AcrossSectionChatResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<uint> CheckConfigFilesAsync(CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildGetConfigFilePayload(Uin, NextClientTime());
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.GetConfigFile, 4, 0xFFFF, payload, ct).ConfigureAwait(false);
+            var r = new BigEndianReader(reply.Payload);
+            return r.Remaining >= 4 ? r.ReadUInt32() : 0u;
+        }
+
         public async Task<SparkResponseData> RequestSparkAsync(uint targetUin, string word, CancellationToken ct = default)
         {
             byte[] payload = ExtendedRequestBuilder.BuildSparkPayload(Uin, targetUin, word);
@@ -655,6 +693,18 @@ namespace Qqtang.Core.Network
         {
             var ev = new BunActionEventData { PlayerId = PlayerId, ClientTime = gameTimeMs, PosX = posX, PosY = posY, BunId = bunId, BunTeamId = bunTeamId };
             await SendGameEventTcpAsync(roomId, schema, ev.Marshal(), ct).ConfigureAwait(false);
+        }
+
+        public async Task SendTankBaseHpAsync(ushort roomId, ushort teamId, short changeHp, uint gameTimeMs, CancellationToken ct = default)
+        {
+            var ev = new TankBaseHpEventData { PlayerId = PlayerId, Time = gameTimeMs, TeamId = teamId, ChangeHp = changeHp };
+            await SendGameEventTcpAsync(roomId, ModeEventSchemas.RequestTankBaseHp, ev.Marshal(), ct).ConfigureAwait(false);
+        }
+
+        public async Task SendWrestleAsync(ushort roomId, byte skillType, byte firstTeam, byte playerPos, uint gameTimeMs, CancellationToken ct = default)
+        {
+            var ev = new WrestleActionEventData { SkillType = skillType, FirstTeam = firstTeam, PlayerPos = playerPos, PlayerId = PlayerId, Time = gameTimeMs };
+            await SendGameEventTcpAsync(roomId, ModeEventSchemas.RequestWrestle, ev.Marshal(), ct).ConfigureAwait(false);
         }
 
         public async Task SendPeerGameplayAsync(
