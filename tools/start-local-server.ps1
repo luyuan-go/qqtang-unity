@@ -45,7 +45,10 @@ $cfg = @"
   "directory_hall": {
     "server_ip": "127.0.0.1",
     "server_port": $GamePort,
-    "server_udp_port": $GamePort
+    "server_udp_port": $GamePort,
+    "shop_server_id": 2,
+    "shop_server_port": $($GamePort + 1),
+    "shop_server_udp_port": $($GamePort + 1)
   },
   "max_packet_bytes": 1048576,
   "idle_timeout_ms": 300000,
@@ -63,7 +66,12 @@ $cfg = @"
     "inventory": [
       { "id": 99, "quantity": 1 },
       { "id": 30098, "quantity": 1 },
-      { "id": 30099, "quantity": 1 }
+      { "id": 30099, "quantity": 1 },
+      { "id": 9001, "quantity": 3 },
+      { "id": 9011, "quantity": 3 },
+      { "id": 2235, "quantity": 1 },
+      { "id": 9020, "quantity": 1 },
+      { "id": 9021, "quantity": 1 }
     ]
   },
   "listeners": [
@@ -83,6 +91,16 @@ $cfg = @"
       }
     },
     {
+      "name": "shop-service",
+      "network": "tcp",
+      "address": "127.0.0.1:$($GamePort + 1)",
+      "response": {
+        "qqt_login_success": true,
+        "qqt_shop_catalog": true,
+        "qqt_shop_type2_session": true
+      }
+    },
+    {
       "name": "game-udp",
       "network": "udp",
       "address": "127.0.0.1:$GamePort",
@@ -93,6 +111,6 @@ $cfg = @"
 "@
 [System.IO.File]::WriteAllText($cfgPath, $cfg, (New-Object System.Text.UTF8Encoding($false)))
 
-Write-Host "[run] Starting qqt-server on 127.0.0.1:$GamePort (TCP+UDP), GM http://127.0.0.1:$GmPort/gm/"
+Write-Host "[run] Starting qqt-server on 127.0.0.1:$GamePort (TCP+UDP), Shop 127.0.0.1:$($GamePort + 1), GM http://127.0.0.1:$GmPort/gm/"
 Write-Host "[run] Default accounts: 1000001 / 123456 and 1000002 / 123456"
 & $serverExe -config $cfgPath

@@ -2,7 +2,8 @@
   "name": "Qqtang.Unity",
   "rootNamespace": "Qqtang.UnityClient",
   "references": [
-    "Qqtang.Core"
+    "Qqtang.Core",
+    "UnityEngine.UI"
   ],
   "includePlatforms": [],
   "excludePlatforms": [],

@@ -37,7 +37,11 @@ namespace Qqtang.Core.Network
         public ushort PlayerId { get; private set; }
         public ushort SectionId { get; private set; } = 1;
         public string Nickname { get; private set; } = string.Empty;
+        public byte Gender { get; private set; }
         public byte RoleId { get; private set; } = 1;
+        public string ConnectedHost { get; private set; } = "127.0.0.1";
+        public int ConnectedGamePort { get; private set; } = 18000;
+        public int ShopPort { get; set; } = 18001;
         public bool IsConnected => _tcp != null && _tcp.Connected;
         public bool UdpPresenceConfirmed { get; private set; }
         public LegacyUdpEndpoint ObservedUdpEndpoint { get; private set; }
@@ -53,6 +57,9 @@ namespace Qqtang.Core.Network
             CancellationToken ct = default)
         {
             Disconnect();
+            ConnectedHost = host;
+            ConnectedGamePort = gamePort;
+            ShopPort = gamePort + 1;
             Uin = uin;
             RoleId = roleId;
             SectionId = sectionId;
@@ -79,6 +86,7 @@ namespace Qqtang.Core.Network
                 throw new InvalidOperationException($"Account login failed: {authResult.Reason}");
 
             Nickname = string.IsNullOrEmpty(authResult.Nickname) ? $"P{uin}" : authResult.Nickname;
+            Gender = authResult.Gender;
 
             // Start TCP receive loop before sending Game Login
             _ = Task.Run(() => TcpReceiveLoopAsync(_cts.Token));
@@ -233,6 +241,358 @@ namespace Qqtang.Core.Network
         {
             byte[] payload = GameRequestBuilder.BuildGameEventRequestPayload(Uin, NextClientTime(), schema, body);
             await SendOneWayAsync(GameCommands.GameEventRequest, 3, roomId, payload, ct).ConfigureAwait(false);
+        }
+
+        // --- Extended Lobby, Room, Chat, Economy, Craft, Pet, Friend, Kin, Marriage APIs ---
+
+        public async Task LogoutAsync(CancellationToken ct = default)
+        {
+            if (!IsConnected) return;
+            try
+            {
+                byte[] payload = ExtendedRequestBuilder.BuildLogoutPayload(Uin, NextClientTime());
+                await SendRequestAsync(GameCommands.Logout, 2, SectionId, payload, ct).ConfigureAwait(false);
+            }
+            catch { }
+            finally
+            {
+                Disconnect();
+            }
+        }
+
+        public async Task<PlayerListResponseData> RefreshPlayerListAsync(ushort startPlayerId = 0, ushort number = 50, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildPlayerListPayload(Uin, NextClientTime(), startPlayerId, number);
+            DecodedLocalPacket reply = await SendRequestAsync(GameCommands.PlayerList, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return PlayerListResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<FindFriendResponseData> FindFriendAsync(uint targetUin, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildFindFriendPayload(Uin, NextClientTime(), targetUin);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.FindFriend, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return FindFriendResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<GameMoneyResponseData> GetGameMoneyAsync(CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildGetGameMoneyPayload(Uin, NextClientTime());
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.GetGameMoney, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return GameMoneyResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<ushort> SendRoomChatAsync(ushort roomId, string content, ushort dstPlayerId = 0xFFFF, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildRoomChatPayload(Uin, NextClientTime(), dstPlayerId, content);
+            DecodedLocalPacket reply = await SendRequestAsync(GameCommands.RoomChat, 3, roomId, payload, ct).ConfigureAwait(false);
+            var r = new BigEndianReader(reply.Payload);
+            return r.ReadUInt16();
+        }
+
+        public async Task<ushort> SendSectionChatAsync(string content, bool smallBugle = false, CancellationToken ct = default)
+        {
+            uint dstUin = smallBugle ? 1u : 0u;
+            byte[] payload = ExtendedRequestBuilder.BuildSectionChatPayload(Uin, NextClientTime(), 0xFFFF, dstUin, content);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.SectionChat, 2, SectionId, payload, ct).ConfigureAwait(false);
+            var r = new BigEndianReader(reply.Payload);
+            return r.ReadUInt16();
+        }
+
+        public async Task<JoinRoomResponseData> QuickJoinRoomAsync(RoomGameType gameType = RoomGameType.CompetitiveNoItem, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildJoinRoomPayload(Uin, NextClientTime(), gameType);
+            DecodedLocalPacket reply = await SendRequestAsync(GameCommands.JoinRoom, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return JoinRoomResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<ushort> ModifyRoomAsync(
+            ushort roomId, string roomName, RoomPropertyFlag roomFlag, string password,
+            RoomGameType gameType, bool nameChanged = true, bool passwordChanged = false, CancellationToken ct = default)
+        {
+            ModifyRoomFlags flags = ModifyRoomFlags.None;
+            if (nameChanged) flags |= ModifyRoomFlags.NameChanged;
+            if ((roomFlag & RoomPropertyFlag.Password) != 0 && !string.IsNullOrEmpty(password))
+                flags |= ModifyRoomFlags.PasswordPresent | ModifyRoomFlags.PasswordEnabled;
+            if (passwordChanged) flags |= ModifyRoomFlags.PasswordChanged;
+
+            string effectivePassword = (roomFlag & RoomPropertyFlag.Password) != 0 ? (password ?? string.Empty) : string.Empty;
+            byte[] payload = ExtendedRequestBuilder.BuildModifyRoomPayload(Uin, NextClientTime(), flags, roomName, roomFlag, effectivePassword, gameType);
+            DecodedLocalPacket reply = await SendRequestAsync(GameCommands.ModifyRoom, 3, roomId, payload, ct).ConfigureAwait(false);
+            var r = new BigEndianReader(reply.Payload);
+            return r.ReadUInt16();
+        }
+
+        public async Task<ushort> ChangeRoomTypeAsync(ushort roomId, RoomGameType gameType, uint continueId = 0, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildChangeRoomTypePayload(Uin, NextClientTime(), gameType, continueId);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.ChangeRoomType, 3, roomId, payload, ct).ConfigureAwait(false);
+            var r = new BigEndianReader(reply.Payload);
+            return r.ReadUInt16();
+        }
+
+        public async Task<ushort> SetSeatStatusAsync(ushort roomId, byte seatId, bool locked, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildSetSeatStatusPayload(Uin, NextClientTime(), seatId, locked);
+            DecodedLocalPacket reply = await SendRequestAsync(GameCommands.SetSeatStatus, 3, roomId, payload, ct).ConfigureAwait(false);
+            var r = new BigEndianReader(reply.Payload);
+            return r.ReadUInt16();
+        }
+
+        public async Task<ushort> KickOffPlayerAsync(ushort roomId, ushort targetPlayerId, uint targetUin, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildKickOffPlayerPayload(Uin, NextClientTime(), targetPlayerId, targetUin);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.KickOffPlayer, 3, roomId, payload, ct).ConfigureAwait(false);
+            var r = new BigEndianReader(reply.Payload);
+            return r.ReadUInt16();
+        }
+
+        public async Task<ushort> UseItemInRoomAsync(ushort roomId, uint itemId, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildUseItemInRoomPayload(Uin, NextClientTime(), itemId);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.UseItemInRoom, 3, roomId, payload, ct).ConfigureAwait(false);
+            var r = new BigEndianReader(reply.Payload);
+            return r.ReadUInt16();
+        }
+
+        public async Task<BackgroundListResponseData> GetBackgroundListAsync(CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildBackgroundListPayload(Uin, NextClientTime());
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.BackgroundList, 4, 0xFFFF, payload, ct).ConfigureAwait(false);
+            return BackgroundListResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<ushort> UseBackgroundAsync(ushort roomId, uint backgroundItemId, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildUseBackgroundPayload(Uin, NextClientTime(), backgroundItemId);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.UseBackground, 4, roomId, payload, ct).ConfigureAwait(false);
+            var r = new BigEndianReader(reply.Payload);
+            r.ReadUInt32(); // UIN
+            r.ReadUInt32(); // Time
+            return r.ReadUInt16();
+        }
+
+        // Shop uses a short-lived auxiliary TCP connection to the dedicated shop listener (gamePort + 1).
+        public async Task<ShopListResponseData> QueryShopListAsync(uint clientShopVersion = 848, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildShopListPayload(Uin, NextClientTime(), 848, 1, clientShopVersion);
+            DecodedLocalPacket reply = await SendShopSocketRequestAsync(ExtendedGameCommands.ShopList, payload, ct).ConfigureAwait(false);
+            return ShopListResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<ShopBuyResponseData> BuyCommodityAsync(
+            uint commodityId, ShopPaymentMethod payType = ShopPaymentMethod.GameMoney, uint catalogVersion = 848, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildShopBuyPayload(Uin, NextClientTime(), commodityId, payType, 2, 848, catalogVersion, 0);
+            DecodedLocalPacket reply = await SendShopSocketRequestAsync(ExtendedGameCommands.ShopBuy, payload, ct).ConfigureAwait(false);
+            return ShopBuyResponseData.Parse(reply.Payload);
+        }
+
+        private async Task<DecodedLocalPacket> SendShopSocketRequestAsync(ushort command, byte[] payload, CancellationToken ct)
+        {
+            using (var shopTcp = new TcpClient { NoDelay = true })
+            {
+                await shopTcp.ConnectAsync(ConnectedHost, ShopPort).ConfigureAwait(false);
+                using (var stream = shopTcp.GetStream())
+                using (var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                {
+                    timeoutCts.CancelAfter(TimeSpan.FromSeconds(10));
+                    uint outerSeq = (uint)Interlocked.Increment(ref _outerSeq);
+                    ushort routeSeq = (ushort)Interlocked.Increment(ref _routeSeq);
+                    byte[] frame = LocalPacketCodec.EncodeLocalPacket(outerSeq, routeSeq, Uin, command, 2, SectionId, payload);
+                    await stream.WriteAsync(frame, 0, frame.Length, timeoutCts.Token).ConfigureAwait(false);
+                    await stream.FlushAsync(timeoutCts.Token).ConfigureAwait(false);
+                    byte[] rawReply = await ReadRawFrameAsync(stream, timeoutCts.Token).ConfigureAwait(false);
+                    return LocalPacketCodec.DecodeLocalPacket(rawReply);
+                }
+            }
+        }
+
+        public async Task<CombineForgeResponseData> CombineForgeAsync(byte type, uint itemId, uint fromItemId, IReadOnlyList<uint> materialIds, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildCombineForgePayload(Uin, NextClientTime(), type, itemId, fromItemId, materialIds);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.CombineForge, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return CombineForgeResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<ForgeResponseData> ForgeAvatarAsync(byte type, uint itemId, uint materialId, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildForgePayload(Uin, NextClientTime(), type, itemId, materialId);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.Forge, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return ForgeResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<BreakEggResponseData> BreakEggAsync(uint hammerId, uint eggId, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildBreakEggPayload(Uin, NextClientTime(), hammerId, eggId);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.BreakEgg, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return BreakEggResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<PlayerPetsResponseData> RefreshPetsAsync(CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildPlayerPetsPayload(Uin, NextClientTime());
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.PlayerPets, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return PlayerPetsResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<HandlePetResponseData> HandlePetAsync(PetEventId eventId, uint petId, string parameter = "", CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildHandlePetPayload(Uin, NextClientTime(), eventId, petId, parameter);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.HandlePet, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return HandlePetResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<FriendListResponseData> RefreshFriendsAsync(CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildFriendListPayload(Uin, NextClientTime());
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.FriendList, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return FriendListResponseData.Parse(reply.Payload);
+        }
+
+        public async Task AddFriendAsync(uint targetUin, string word = "你好，交个朋友吧", CancellationToken ct = default)
+        {
+            // Server sends no immediate response on success (forwards 0x00A3 to target; rejects via 0x00A6).
+            byte[] payload = ExtendedRequestBuilder.BuildAddFriendPayload(Uin, NextClientTime(), targetUin, word);
+            await SendOneWayAsync(ExtendedGameCommands.AddFriend, 2, SectionId, payload, ct).ConfigureAwait(false);
+        }
+
+        public async Task<RemoveFriendResponseData> RemoveFriendAsync(uint targetUin, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildRemoveFriendPayload(Uin, NextClientTime(), targetUin);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.RemoveFriend, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return RemoveFriendResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<AnswerFriendResultData> AnswerFriendAsync(uint requesterUin, bool accepted, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildAnswerFriendPayload(accepted, requesterUin, NextClientTime(), Uin);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.AnswerFriend, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return AnswerFriendResultData.Parse(reply.Payload);
+        }
+
+        public async Task<CreateKinResponseData> CreateKinAsync(string name, string declaration, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildCreateKinPayload(Uin, NextClientTime(), name, declaration, SectionId);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.CreateKin, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return CreateKinResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<KinBaseData> FetchKinBaseAsync(uint kinIndex, bool isMember = true, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildFetchKinBasePayload(Uin, NextClientTime(), kinIndex, isMember ? 1u : 0u);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.FetchKinBase, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return KinBaseData.ParseFetchBaseResponse(reply.Payload);
+        }
+
+        public async Task<FetchKinMembersResponseData> FetchKinMembersAsync(uint kinIndex, uint listUpdate = 0, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildFetchKinMembersPayload(Uin, NextClientTime(), kinIndex, listUpdate);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.FetchKinMemberList, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return FetchKinMembersResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<KinOperationResponseData> InviteToKinAsync(uint kinIndex, uint targetUin, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildKinOperationPayload(Uin, NextClientTime(), kinIndex, targetUin, 0, 0);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.OperateKin, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return KinOperationResponseData.Parse(reply.Payload);
+        }
+
+        public async Task AnswerKinInviteAsync(uint inviterUin, uint kinIndex, bool accepted, CancellationToken ct = default)
+        {
+            // One-way answer; server replies with ServerOperateKinNotify (0x00BD) follow-up.
+            byte[] payload = ExtendedRequestBuilder.BuildKinServerOperationAnswerPayload(inviterUin, NextClientTime(), kinIndex, Uin, accepted);
+            await SendOneWayAsync(ExtendedGameCommands.ServerOperateKin, 2, SectionId, payload, ct).ConfigureAwait(false);
+        }
+
+        public async Task SendKinChatAsync(uint kinIndex, string message, CancellationToken ct = default)
+        {
+            // One-way request; server echoes KinChatNotify (0x00BF) to all online kin members including sender.
+            byte[] payload = ExtendedRequestBuilder.BuildKinChatPayload(Uin, NextClientTime(), kinIndex, message);
+            await SendOneWayAsync(ExtendedGameCommands.KinChat, 2, SectionId, payload, ct).ConfigureAwait(false);
+        }
+
+        public async Task<KinSimpleResultData> KickKinMemberAsync(uint kinIndex, uint dstUin, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildKickKinMemberPayload(Uin, NextClientTime(), dstUin, kinIndex);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.KickKinMember, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return KinSimpleResultData.ParseTarget(reply.Payload);
+        }
+
+        public async Task<KinSimpleResultData> ExitKinAsync(uint kinIndex, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildExitKinPayload(Uin, NextClientTime(), kinIndex);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.ExitKin, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return KinSimpleResultData.ParseSelf(reply.Payload, false);
+        }
+
+        public async Task<KinSimpleResultData> DismissKinAsync(uint kinIndex, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildDismissKinPayload(Uin, NextClientTime(), kinIndex, 0);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.DismissKin, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return KinSimpleResultData.ParseSelf(reply.Payload, true);
+        }
+
+        public async Task<KinSimpleResultData> SetKinDeclarationAsync(uint kinIndex, string declaration, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildSetKinDeclarationPayload(Uin, NextClientTime(), kinIndex, declaration);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.SetKinDeclaration, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return KinSimpleResultData.ParseText(reply.Payload, false);
+        }
+
+        public async Task<KinSimpleResultData> SetKinNotificationAsync(uint kinIndex, string notification, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildSetKinNotificationPayload(Uin, NextClientTime(), kinIndex, notification);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.SetKinNotification, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return KinSimpleResultData.ParseText(reply.Payload, true);
+        }
+
+        public async Task<FetchKinTopResponseData> FetchKinTopAsync(uint kinIndex, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildFetchKinTopPayload(Uin, NextClientTime(), kinIndex);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.FetchKinTop, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return FetchKinTopResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<SparkResponseData> RequestSparkAsync(uint targetUin, string word, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildSparkPayload(Uin, targetUin, word);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.RequestSpark, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return SparkResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<AnswerSparkResultData> AnswerSparkAsync(uint proposerUin, bool accepted, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildAnswerSparkPayload(Uin, proposerUin, accepted);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.AnswerSpark, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return AnswerSparkResultData.Parse(reply.Payload);
+        }
+
+        public async Task<MarriageInfoResponseData> GetMarriageInfoAsync(uint targetUin = 0, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildMarriageInfoPayload(Uin, targetUin == 0 ? Uin : targetUin);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.MarriageInfo, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return MarriageInfoResponseData.Parse(reply.Payload);
+        }
+
+        public async Task<MarriageSimpleResultData> ModifyLoveWordAsync(uint spouseUin, string loveWord, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildModifyLoveWordPayload(Uin, spouseUin, loveWord);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.ModifyLoveWord, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return MarriageSimpleResultData.Parse(reply.Payload);
+        }
+
+        public async Task<MarriageSimpleResultData> DivorceAsync(uint spouseUin, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildDivorcePayload(Uin, spouseUin);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.Divorce, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return MarriageSimpleResultData.Parse(reply.Payload);
+        }
+
+        public async Task SendUseEmotionAsync(ushort roomId, uint emotionId, uint gameTimeMs, CancellationToken ct = default)
+        {
+            var body = new UseEmotionEventData { Uin = Uin, Time = gameTimeMs, EmotionId = emotionId }.Marshal();
+            await SendGameEventTcpAsync(roomId, ExtendedGameEventSchemas.NotifyUseEmotion, body, ct).ConfigureAwait(false);
         }
 
         public async Task SendPeerGameplayAsync(

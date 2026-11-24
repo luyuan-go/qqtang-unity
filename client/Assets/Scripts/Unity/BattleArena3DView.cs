@@ -33,8 +33,11 @@ namespace Qqtang.UnityClient
         private sealed class ActorVisual
         {
             public GameObject Root;
+            public Transform SpriteTransform;
             public SpriteRenderer Body;
             public GameObject TrappedBubble;
+            public GameObject ShieldAura;
+            public GameObject EmoteBadge;
             public GameObject TeamRing;
             public BattleDirection LastDir = BattleDirection.None;
             public byte RoleId;
@@ -201,11 +204,37 @@ namespace Qqtang.UnityClient
             trap.GetComponent<MeshRenderer>().sharedMaterial = trapMat;
             trap.SetActive(false);
 
+            // Shield invulnerability aura ring
+            var shield = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+            shield.name = "ShieldAura";
+            shield.transform.SetParent(root.transform, false);
+            shield.transform.localPosition = new Vector3(0f, 0.45f, 0f);
+            shield.transform.localScale = new Vector3(0.96f, 0.42f, 0.96f);
+            Destroy(shield.GetComponent<Collider>());
+            var shieldMat = new Material(Shader.Find("Sprites/Default"));
+            shieldMat.color = new Color(0.95f, 0.78f, 0.28f, 0.35f);
+            shield.GetComponent<MeshRenderer>().sharedMaterial = shieldMat;
+            shield.SetActive(false);
+
+            // Overhead emote indicator
+            var emote = new GameObject("EmoteBadge");
+            emote.transform.SetParent(root.transform, false);
+            emote.transform.localPosition = new Vector3(0f, 1.45f, 0f);
+            emote.transform.localScale = new Vector3(0.55f, 0.55f, 0.55f);
+            var emoteSr = emote.AddComponent<SpriteRenderer>();
+            emoteSr.sprite = _art.GetSprite("effects/emote", new Color(1f, 0.88f, 0.32f), circleMask: true);
+            emoteSr.sortingOrder = 20;
+            emote.AddComponent<BillboardSprite>();
+            emote.SetActive(false);
+
             return new ActorVisual
             {
                 Root = root,
+                SpriteTransform = spriteObj.transform,
                 Body = sr,
                 TrappedBubble = trap,
+                ShieldAura = shield,
+                EmoteBadge = emote,
                 TeamRing = ring,
                 RoleId = actor.RoleId
             };
@@ -215,7 +244,8 @@ namespace Qqtang.UnityClient
         {
             if (sim == null || sim.Map == null || _arenaRoot == null) return;
 
-            // 1. Hide destroyed breakable walls
+            // 1. Update destroyed or pushed blocks
+            Shader litShader = Shader.Find("Standard") ?? Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Sprites/Default");
             for (int i = 0; i < _lastCellStates.Length; i++)
             {
                 if (_lastCellStates[i] != sim.Map.Cells[i].Collision)
@@ -225,6 +255,25 @@ namespace Qqtang.UnityClient
                     {
                         Destroy(_blockObjects[i]);
                         _blockObjects[i] = null;
+                    }
+                    else if (_blockObjects[i] == null && sim.Map.Cells[i].Collision != CellCollision.Open)
+                    {
+                        int r = i / _width, c = i % _width;
+                        var cell = sim.Map.Cells[i];
+                        bool breakable = cell.Collision == CellCollision.Breakable;
+                        var block = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                        block.name = $"Block_{r}_{c}";
+                        block.transform.SetParent(_arenaRoot, false);
+                        float h = breakable ? 0.72f : 0.96f;
+                        block.transform.position = CellToWorld(r, c, h * 0.5f);
+                        block.transform.localScale = new Vector3(0.94f, h, 0.94f);
+                        Destroy(block.GetComponent<Collider>());
+                        Color fallback = breakable ? new Color(0.78f, 0.54f, 0.28f) : new Color(0.36f, 0.42f, 0.50f);
+                        var bMat = new Material(litShader);
+                        int visId = cell.VisualSceneElementId > 0 ? cell.VisualSceneElementId : (int)cell.MapElementId;
+                        bMat.mainTexture = _art.GetMapElementTexture(visId, fallback);
+                        block.GetComponent<MeshRenderer>().sharedMaterial = bMat;
+                        _blockObjects[i] = block;
                     }
                 }
             }
@@ -245,6 +294,15 @@ namespace Qqtang.UnityClient
                 vis.Root.SetActive(true);
                 vis.Root.transform.position = PixelToWorld(actor.PosX, actor.PosY, 0f);
                 vis.TrappedBubble.SetActive(actor.State == ActorLifeState.Trapped);
+                if (vis.ShieldAura != null)
+                    vis.ShieldAura.SetActive(actor.IsInvulnerable(sim.ElapsedMs));
+                if (vis.EmoteBadge != null)
+                    vis.EmoteBadge.SetActive(actor.ActiveEmotionId != 0 && sim.ElapsedMs < actor.EmotionExpireAtMs);
+                if (vis.SpriteTransform != null)
+                {
+                    float walkBob = actor.Moving ? Mathf.Abs(Mathf.Sin(Time.time * 12f)) * 0.10f : 0f;
+                    vis.SpriteTransform.localPosition = new Vector3(0f, 0.08f + walkBob, 0f);
+                }
 
                 if (vis.LastDir != actor.Facing)
                 {

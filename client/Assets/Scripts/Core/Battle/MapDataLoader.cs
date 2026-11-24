@@ -47,6 +47,7 @@ namespace Qqtang.Core.Battle
         public bool NativeGridAttrSet;
         public uint NativePlayerExitAttr;
         public bool MapElementOccupied;
+        public bool Pushable;
         public byte Durability;
         public uint MapElementId;
         public int VisualGroundElementId;
@@ -297,6 +298,7 @@ namespace Qqtang.Core.Battle
                                     projected.Collision = CellCollision.Open;
                                 if (def.LifeTime > 0 || (def.CanMove & 2u) != 0)
                                     projected.MapElementId = def.Id;
+                                projected.Pushable = (def.CanMove & 2u) != 0;
                                 map.Cells[tidx] = projected;
                             }
                         }

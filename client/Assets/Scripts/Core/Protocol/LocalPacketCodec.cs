@@ -174,11 +174,24 @@ namespace Qqtang.Core.Protocol
         {
             try
             {
+                // Register System.Text.Encoding.CodePages when available (.NET Core / .NET 8+ / Unity with CodePages)
+                var providerType = Type.GetType("System.Text.CodePagesEncodingProvider, System.Text.Encoding.CodePages");
+                var instanceProp = providerType?.GetProperty("Instance", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                if (instanceProp?.GetValue(null) is EncodingProvider provider)
+                    Encoding.RegisterProvider(provider);
+            }
+            catch
+            {
+                // Ignore if CodePages assembly is not present in the runtime.
+            }
+
+            try
+            {
                 return Encoding.GetEncoding(936);
             }
             catch
             {
-                // shortcut: fallback to UTF-8 when CP936 provider is absent in minimal runtimes, upgrade by bundling System.Text.Encoding.CodePages if non-ASCII room/nicknames are required.
+                // shortcut: fallback to UTF-8 when CP936 provider is absent in minimal runtimes, upgrade by bundling I18N.CJK/CodePages for non-ASCII GBK.
                 return Encoding.UTF8;
             }
         }
@@ -193,13 +206,19 @@ namespace Qqtang.Core.Protocol
             return truncated;
         }
 
+        public static string DecodeBytes(byte[] raw, int offset, int count)
+        {
+            if (raw == null || count <= 0) return string.Empty;
+            int len = count;
+            while (len > 0 && raw[offset + len - 1] == 0) len--;
+            if (len == 0) return string.Empty;
+            return GbkOrFallback.GetString(raw, offset, len);
+        }
+
         public static string DecodeNullTerminated(byte[] raw)
         {
             if (raw == null || raw.Length == 0) return string.Empty;
-            int len = raw.Length;
-            while (len > 0 && raw[len - 1] == 0) len--;
-            if (len == 0) return string.Empty;
-            return GbkOrFallback.GetString(raw, 0, len);
+            return DecodeBytes(raw, 0, raw.Length);
         }
     }
 

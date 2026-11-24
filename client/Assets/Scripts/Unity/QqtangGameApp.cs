@@ -5,22 +5,25 @@ using System.Threading.Tasks;
 using Qqtang.Core.Battle;
 using Qqtang.Core.Network;
 using Qqtang.Core.Protocol;
+using Qqtang.Core.State;
+using Qqtang.UnityClient.UI;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace Qqtang.UnityClient
 {
     public enum ClientScreenState
     {
         Login,
-        Lobby,
+        MainShell,
         Room,
         Battle,
         Settlement
     }
 
     /// <summary>
-    /// End-to-end playable Unity 3D client controller:
-    ///   Login (QQTAUTH1 + 0x0064) -> Lobby/Room -> Rule-1 3D Battle (QQTPPP UDP + TCP) -> Settlement.
+    /// Complete Unity 3D + Daoist UGUI client coordinator wired directly to the unmodified Go QQTang server.
+    /// Manages Login, Lobby, Room, Inventory, Shop, Forge/Combine/BreakEgg, Pets, Friends/Kin/Marriage, and Rule-1 3D Battle.
     /// </summary>
     public sealed class QqtangGameApp : MonoBehaviour
     {
@@ -34,48 +37,54 @@ namespace Qqtang.UnityClient
         }
 
         private QqtangSessionClient _session;
+        private ClientStateStore _store;
+        private StaticCatalogs _catalogs;
         private ArtAssetResolver _art;
+        private AudioPlayer _audio;
         private BattleArena3DView _arenaView;
         private Rule1BattleSimulation _sim;
+
         private Dictionary<uint, MapElementDef> _mapElements;
         private Dictionary<uint, string> _mapFileById;
 
-        private ClientScreenState _state = ClientScreenState.Login;
-        private string _statusMessage = "Ready to connect to local Go qqt-server.";
-        private bool _busy;
+        // UI
+        private Canvas _canvas;
+        private LoginPanelView _loginView;
+        private LobbyAndNavView _lobbyView;
+        private RoomPanelView _roomView;
+        private InventoryShopCraftView _ecoView;
+        private PetAndSocialView _socialView;
+        private BattleHudAndSettlementView _battleView;
+        private RectTransform _toastPanel;
+        private Text _toastText;
+        private float _toastTimer;
 
-        // Login form
-        private string _host = "127.0.0.1";
-        private string _portText = "18000";
-        private string _uinText = "1000001";
-        private string _password = "123456";
-        private byte _selectedRoleId = 1;
-
-        // Lobby & Room state
-        private string _newRoomName = "DaoistRoom";
-        private bool _createFreeRule;
-        private List<RoomListEntryData> _rooms = new List<RoomListEntryData>();
-        private ushort _currentRoomId;
-        private ushort _currentMapId = 201;
-        private ushort _roomOwnerId;
-        private bool _roomFreeRule;
-        private bool _isReady;
-        private bool _aiCardActive;
-        private List<RoomMemberData> _roomMembers = new List<RoomMemberData>();
+        private ClientScreenState _screen = ClientScreenState.Login;
+        private MainTab _activeTab = MainTab.Lobby;
+        private int _lastRenderedStateVersion = -1;
+        private uint _shopCatalogVersion = 848;
+        private int _chatBgCursor;
 
         // Battle state
         private readonly List<LegacyUdpMulticastTarget> _battlePeers = new List<LegacyUdpMulticastTarget>();
         private float _simAccumulatorMs;
         private float _helloTimer;
-        private GameOverData _lastSettlement;
+        private float _lobbyPollTimer;
 
         private void Awake()
         {
             _session = new QqtangSessionClient();
+            _store = new ClientStateStore();
+            _catalogs = new StaticCatalogs();
             _art = new ArtAssetResolver();
+            _audio = gameObject.AddComponent<AudioPlayer>();
             _arenaView = gameObject.AddComponent<BattleArena3DView>();
             _arenaView.Initialize(_art);
-            LoadLocalMapCatalogs();
+
+            LoadCatalogsAndMaps();
+            BuildUi();
+            BindStoreEvents();
+            SetScreen(ClientScreenState.Login);
         }
 
         private void OnDestroy()
@@ -83,15 +92,22 @@ namespace Qqtang.UnityClient
             _session?.Dispose();
         }
 
-        private void LoadLocalMapCatalogs()
+        private void LoadCatalogsAndMaps()
         {
-            string localMapsDir = Path.Combine(Application.streamingAssetsPath, "LocalMaps");
+            string streaming = Application.streamingAssetsPath;
+            string repoServer = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "..", "server"));
+            string localMapsDir = Path.Combine(streaming, "LocalMaps");
+            _catalogs.LoadFromDirectories(
+                Path.Combine(streaming, "Catalogs"),
+                localMapsDir,
+                repoServer,
+                @"C:\Users\luyua\Downloads\QQTang-Local\runtime\client-patched");
+
             string elemPy = Path.Combine(localMapsDir, "mapElem.py");
             string descPy = Path.Combine(localMapsDir, "mapDesc.py");
             if (File.Exists(elemPy))
             {
-                try { _mapElements = MapDataLoader.LoadMapElementsPy(elemPy); }
-                catch (Exception ex) { _statusMessage = $"mapElem.py load note: {ex.Message}"; }
+                try { _mapElements = MapDataLoader.LoadMapElementsPy(elemPy); } catch { }
             }
             if (File.Exists(descPy))
             {
@@ -100,33 +116,115 @@ namespace Qqtang.UnityClient
             }
         }
 
-        private LoadedMapData LoadBattleMap(uint mapId)
+        private void BuildUi()
         {
-            string localMapsDir = Path.Combine(Application.streamingAssetsPath, "LocalMaps");
-            if (_mapElements != null && Directory.Exists(localMapsDir))
-            {
-                string fileName = null;
-                if (_mapFileById != null && _mapFileById.TryGetValue(mapId, out var mapped)) fileName = mapped;
-                else if (mapId == 201) fileName = "town01.map";
+            _canvas = UiFactory.CreateRootCanvas("QqtangDaoistCanvas");
+            DontDestroyOnLoad(_canvas.gameObject);
 
-                if (!string.IsNullOrEmpty(fileName))
-                {
-                    string full = Path.Combine(localMapsDir, fileName);
-                    if (File.Exists(full))
-                    {
-                        try { return MapDataLoader.ParseMapBytes(mapId, File.ReadAllBytes(full), _mapElements); }
-                        catch (Exception ex) { _statusMessage = $"Map {mapId} fallback: {ex.Message}"; }
-                    }
-                }
+            var ctx = new UiContext
+            {
+                App = this,
+                Session = _session,
+                Store = _store,
+                Catalogs = _catalogs,
+                Art = _art
+            };
+
+            _loginView = new LoginPanelView(_canvas.transform, ctx);
+            _lobbyView = new LobbyAndNavView(_canvas.transform, ctx);
+            _ecoView = new InventoryShopCraftView(_lobbyView.ContentArea, ctx);
+            _socialView = new PetAndSocialView(_lobbyView.ContentArea, ctx);
+            _roomView = new RoomPanelView(_canvas.transform, ctx);
+            _battleView = new BattleHudAndSettlementView(_canvas.transform, ctx);
+
+            _lobbyView.OnTabSelected = SelectMainTab;
+
+            // Floating Toast Banner (top-center)
+            _toastPanel = UiFactory.CreatePanel(_canvas.transform, "ToastBanner", new Color(0.10f, 0.16f, 0.21f, 0.94f), UiFactory.AccentGold);
+            _toastPanel.anchorMin = new Vector2(0.5f, 1f);
+            _toastPanel.anchorMax = new Vector2(0.5f, 1f);
+            _toastPanel.pivot = new Vector2(0.5f, 1f);
+            _toastPanel.anchoredPosition = new Vector2(0f, -68f);
+            _toastPanel.sizeDelta = new Vector2(560f, 38f);
+            _toastText = UiFactory.CreateText(_toastPanel, "", 14, UiFactory.AccentGold, TextAnchor.MiddleCenter, FontStyle.Bold);
+            UiFactory.Stretch(_toastText.rectTransform, 10, 4, 10, 4);
+            _toastPanel.gameObject.SetActive(false);
+        }
+
+        private void BindStoreEvents()
+        {
+            _store.OnToastRequested += ShowToast;
+            _store.OnGameBeginReceived += StartBattle;
+            _store.OnGameOverReceived += over =>
+            {
+                _audio.PlaySfx("victory");
+                SetScreen(ClientScreenState.Settlement);
+                _battleView.ShowSettlement(over);
+            };
+            _store.OnBattleGameEventReceived += ev =>
+            {
+                if (_sim != null) _sim.ApplyRemoteMessage(0, ev.Schema, ev.Body);
+            };
+        }
+
+        private void SetScreen(ClientScreenState screen)
+        {
+            _screen = screen;
+            _loginView.SetVisible(screen == ClientScreenState.Login);
+            _lobbyView.SetShellVisible(screen == ClientScreenState.MainShell);
+            _roomView.SetVisible(screen == ClientScreenState.Room);
+            _battleView.SetHudVisible(screen == ClientScreenState.Battle);
+            if (screen != ClientScreenState.Settlement) _battleView.HideSettlement();
+
+            if (screen == ClientScreenState.MainShell)
+            {
+                _arenaView.ClearArena();
+                SelectMainTab(_activeTab);
             }
-            return MapDataLoader.BuildFallbackArena(mapId);
+            else if (screen == ClientScreenState.Room)
+            {
+                _arenaView.ClearArena();
+                _roomView.Refresh();
+            }
+            else if (screen == ClientScreenState.Login)
+            {
+                _arenaView.ClearArena();
+            }
+        }
+
+        private void SelectMainTab(MainTab tab)
+        {
+            _activeTab = tab;
+            _lobbyView.SetActiveTabHighlight(tab);
+            _ecoView.SetActiveView(tab);
+            _socialView.SetActiveView(tab);
+
+            if (tab == MainTab.Lobby) RequestRefreshLobby();
+            else if (tab == MainTab.Pets) RequestRefreshPets();
+            else if (tab == MainTab.Social) RequestRefreshSocial();
+            else if (tab == MainTab.Shop) _ecoView.RefreshShop();
+            else if (tab == MainTab.Inventory) _ecoView.RefreshInventory();
+        }
+
+        private void ShowToast(string message)
+        {
+            if (string.IsNullOrEmpty(message)) return;
+            _toastText.text = message;
+            _toastPanel.gameObject.SetActive(true);
+            _toastTimer = 3.2f;
         }
 
         private void Update()
         {
             DrainNetworkQueues();
 
-            if (_session.IsConnected && _state != ClientScreenState.Login)
+            if (_toastTimer > 0f)
+            {
+                _toastTimer -= Time.deltaTime;
+                if (_toastTimer <= 0f) _toastPanel.gameObject.SetActive(false);
+            }
+
+            if (_session.IsConnected && _screen != ClientScreenState.Login)
             {
                 _helloTimer += Time.deltaTime;
                 if (_helloTimer >= 15f)
@@ -134,25 +232,104 @@ namespace Qqtang.UnityClient
                     _helloTimer = 0f;
                     _ = _session.SendHelloAsync();
                 }
-            }
 
-            if (_state == ClientScreenState.Battle && _sim != null)
-            {
-                BattleDirection moveInput = ReadMoveInput();
-                bool bombPressed = Input.GetKeyDown(KeyCode.Space) || Input.GetKeyDown(KeyCode.J);
-
-                _simAccumulatorMs += Time.deltaTime * 1000f;
-                const uint fixedStepMs = 25;
-                bool bombQueued = bombPressed;
-                while (_simAccumulatorMs >= fixedStepMs)
+                if (_screen == ClientScreenState.MainShell && _activeTab == MainTab.Lobby)
                 {
-                    _simAccumulatorMs -= fixedStepMs;
-                    _sim.Step(fixedStepMs, moveInput, bombQueued);
-                    bombQueued = false;
-                    FlushOutgoingBattleEvents();
+                    _lobbyPollTimer += Time.deltaTime;
+                    if (_lobbyPollTimer >= 6f)
+                    {
+                        _lobbyPollTimer = 0f;
+                        RequestRefreshLobby();
+                    }
                 }
-                _arenaView.SyncView(_sim);
             }
+
+            // Detect kicked-out transition back to Lobby
+            if (_screen == ClientScreenState.Room && !_store.InRoom)
+                SetScreen(ClientScreenState.MainShell);
+
+            // Re-render active UI panel only when store version advances
+            if (_lastRenderedStateVersion != _store.StateVersion)
+            {
+                _lastRenderedStateVersion = _store.StateVersion;
+                RefreshVisibleScreen();
+            }
+
+            if (_screen == ClientScreenState.Battle && _sim != null)
+            {
+                StepBattleFrame();
+            }
+        }
+
+        private void RefreshVisibleScreen()
+        {
+            if (_screen == ClientScreenState.MainShell)
+            {
+                _lobbyView.Refresh();
+                _ecoView.RefreshAllVisible();
+                _socialView.RefreshAllVisible();
+            }
+            else if (_screen == ClientScreenState.Room)
+            {
+                _roomView.Refresh();
+            }
+        }
+
+        private void DrainNetworkQueues()
+        {
+            while (_session.TryDequeueDiagnostic(out string diag))
+                ShowToast(diag);
+
+            while (_session.TryDequeueTcpPacket(out var pkt))
+                _store.ApplyServerPacket(pkt);
+
+            while (_session.TryDequeueUdpBatch(out var batch))
+            {
+                if (_screen == ClientScreenState.Battle && _sim != null && batch.GameId == _sim.GameId)
+                {
+                    foreach (var entry in batch.Entries)
+                    {
+                        foreach (var msg in entry.Package.Messages)
+                            _sim.ApplyRemoteMessage(entry.Package.PlayerId, msg.DataId, msg.Data);
+                    }
+                }
+            }
+        }
+
+        private void StepBattleFrame()
+        {
+            if (Input.GetKeyDown(KeyCode.Escape))
+                _battleView.TogglePause();
+
+            bool pauseOpen = _battleView.IsPauseOpen;
+            BattleDirection moveInput = pauseOpen ? BattleDirection.None : ReadMoveInput();
+            bool bombPressed = !pauseOpen && (Input.GetKeyDown(KeyCode.Space) || Input.GetKeyDown(KeyCode.J));
+
+            if (!pauseOpen)
+            {
+                if (Input.GetKeyDown(KeyCode.Alpha1)) TriggerBattleWorldItem(63);
+                if (Input.GetKeyDown(KeyCode.Alpha2)) TriggerBattleWorldItem(41);
+                if (Input.GetKeyDown(KeyCode.Alpha3)) TriggerBattleWorldItem(64);
+                if (Input.GetKeyDown(KeyCode.E)) TriggerBattleEmotion(1);
+            }
+
+            _simAccumulatorMs += Time.deltaTime * 1000f;
+            const uint fixedStepMs = 25;
+            bool bombQueued = bombPressed;
+            while (_simAccumulatorMs >= fixedStepMs)
+            {
+                _simAccumulatorMs -= fixedStepMs;
+                int prevBombs = _sim.Bombs.Count;
+                int prevFlames = _sim.Flames.Count;
+                _sim.Step(fixedStepMs, moveInput, bombQueued);
+                if (_sim.Bombs.Count > prevBombs) _audio.PlaySfx("bomb_place", 0.5f);
+                if (_sim.Flames.Count > prevFlames) _audio.PlaySfx("explode", 0.65f);
+                bombQueued = false;
+                FlushOutgoingBattleEvents();
+            }
+
+            _arenaView.SyncView(_sim);
+            _battleView.UpdateHud(_sim, _store.MapId);
         }
 
         private static BattleDirection ReadMoveInput()
@@ -171,397 +348,603 @@ namespace Qqtang.UnityClient
                 var copy = new List<(uint, byte[])>(_sim.OutgoingPeerEvents);
                 bool mirrorTcp = false;
                 foreach (var ev in copy)
-                {
                     if (ev.Item1 != GameEventSchemas.PlayerMove) { mirrorTcp = true; break; }
-                }
                 _ = _session.SendPeerGameplayAsync(_sim.GameId, _sim.ElapsedMs, _battlePeers, copy, mirrorTcp);
             }
             if (_sim.OutgoingTcpEvents.Count > 0)
             {
                 foreach (var ev in _sim.OutgoingTcpEvents)
-                {
-                    _ = _session.SendGameEventTcpAsync(_currentRoomId, ev.schemaId, ev.body);
-                }
-            }
-        }
-
-        private void DrainNetworkQueues()
-        {
-            while (_session.TryDequeueDiagnostic(out string diag))
-                _statusMessage = diag;
-
-            while (_session.TryDequeueTcpPacket(out var pkt))
-                HandleServerTcpPush(pkt);
-
-            while (_session.TryDequeueUdpBatch(out var batch))
-            {
-                if (_state == ClientScreenState.Battle && _sim != null && batch.GameId == _sim.GameId)
-                {
-                    foreach (var entry in batch.Entries)
-                    {
-                        foreach (var msg in entry.Package.Messages)
-                            _sim.ApplyRemoteMessage(entry.Package.PlayerId, msg.DataId, msg.Data);
-                    }
-                }
-            }
-        }
-
-        private void HandleServerTcpPush(DecodedLocalPacket pkt)
-        {
-            try
-            {
-                switch (pkt.Command)
-                {
-                    case GameCommands.RoomPush:
-                        var pushed = RoomListResponseData.ParseRoomPush(pkt.Payload);
-                        foreach (var r in pushed)
-                        {
-                            _rooms.RemoveAll(x => x.RoomId == r.RoomId);
-                            if (r.CurrentPlayers > 0) _rooms.Add(r);
-                        }
-                        break;
-
-                    case GameCommands.EnterRoomNotify:
-                        var (member, roomId) = EnterRoomResponseData.ParseEnterRoomNotify(pkt.Payload);
-                        if (roomId == _currentRoomId)
-                        {
-                            _roomMembers.RemoveAll(m => m.PlayerId == member.PlayerId);
-                            _roomMembers.Add(member);
-                        }
-                        break;
-
-                    case GameCommands.LeaveRoomNotify:
-                        var left = LeaveRoomNotifyData.Parse(pkt.Payload);
-                        _roomMembers.RemoveAll(m => m.PlayerId == left.PlayerId);
-                        if (left.NewRoomOwnerId != 0) _roomOwnerId = left.NewRoomOwnerId;
-                        break;
-
-                    case GameCommands.ReadyStateNotify:
-                        var rr = new BigEndianReader(pkt.Payload);
-                        rr.ReadUInt32(); // UIN
-                        ushort pid = rr.ReadUInt16();
-                        byte ready = rr.ReadByte();
-                        var rm = _roomMembers.Find(m => m.PlayerId == pid);
-                        if (rm != null) rm.Status = ready;
-                        break;
-
-                    case GameCommands.ChangeTeamNotify:
-                        var tr = new BigEndianReader(pkt.Payload);
-                        tr.ReadUInt32();
-                        ushort tpid = tr.ReadUInt16();
-                        byte newTeam = tr.ReadByte();
-                        var tm = _roomMembers.Find(m => m.PlayerId == tpid);
-                        if (tm != null) tm.TeamId = newTeam;
-                        break;
-
-                    case GameCommands.ChangeRoleNotify:
-                        var cr = new BigEndianReader(pkt.Payload);
-                        cr.ReadUInt32();
-                        ushort rpid = cr.ReadUInt16();
-                        byte newRole = cr.ReadByte();
-                        var cm = _roomMembers.Find(m => m.PlayerId == rpid);
-                        if (cm != null && cm.GameInfo != null) cm.GameInfo.RoleId = newRole;
-                        break;
-
-                    case GameCommands.ModifyRoomInfoNotify:
-                        var mr = new BigEndianReader(pkt.Payload);
-                        _currentMapId = mr.ReadUInt16();
-                        break;
-
-                    case GameCommands.GameBeginNotify:
-                        var begin = GameBeginData.ParseLengthPrefixed(pkt.Payload);
-                        StartBattle(begin);
-                        break;
-
-                    case GameCommands.GameEventNotify:
-                        var ev = NotifyGameEventMessage.Parse(pkt.Payload);
-                        if (ev.Schema == GameEventSchemas.NotifyGameOver)
-                        {
-                            _lastSettlement = GameOverData.Parse(ev.Body);
-                            _state = ClientScreenState.Settlement;
-                            _statusMessage = "Match settled by Go server.";
-                        }
-                        else if (_sim != null)
-                        {
-                            _sim.ApplyRemoteMessage(0, ev.Schema, ev.Body);
-                        }
-                        break;
-                }
-            }
-            catch (Exception ex)
-            {
-                _statusMessage = $"Packet 0x{pkt.Command:X4} error: {ex.Message}";
+                    _ = _session.SendGameEventTcpAsync(_store.RoomId, ev.schemaId, ev.body);
             }
         }
 
         private void StartBattle(GameBeginData begin)
         {
-            _currentMapId = (ushort)begin.MapId;
             _battlePeers.Clear();
-            foreach (var p in begin.Players)
+            foreach (var member in _store.RoomMembers)
             {
-                if (p.PlayerId == _session.PlayerId) continue;
-                var member = _roomMembers.Find(m => m.PlayerId == p.PlayerId);
-                uint peerUin = member != null ? member.Uin : (uint)(900000000u + p.PlayerId);
-                _battlePeers.Add(new LegacyUdpMulticastTarget { PlayerId = p.PlayerId, Uin = peerUin });
-                _ = _session.SendUdpOkAsync(p.PlayerId, peerUin, readyMode: true);
+                if (member.PlayerId != _session.PlayerId)
+                    _battlePeers.Add(new LegacyUdpMulticastTarget { PlayerId = member.PlayerId, Uin = member.Uin });
             }
+            foreach (var peer in _battlePeers)
+                _ = _session.SendUdpOkAsync(peer.PlayerId, peer.Uin, true);
 
             LoadedMapData map = LoadBattleMap(begin.MapId);
             _sim = new Rule1BattleSimulation();
-            _sim.Initialize(begin, map, _session.PlayerId, _roomFreeRule);
+            bool freeRule = (_store.RoomFlag & (byte)RoomPropertyFlag.FreeRule) != 0;
+            _sim.Initialize(begin, map, _session.PlayerId, freeRule);
+            foreach (var m in _store.RoomMembers)
+                _sim.RegisterParticipantUin(m.Uin, m.PlayerId);
             _simAccumulatorMs = 0f;
+
             _arenaView.BuildArena(_sim);
-            _arenaView.SyncView(_sim);
-            _state = ClientScreenState.Battle;
-            _statusMessage = $"Battle started! GameID={begin.GameId}, Map={begin.MapId}, Players={begin.Players.Count}";
+            SetScreen(ClientScreenState.Battle);
+            ShowToast($"对局开始！地图: {_catalogs.GetMapName((ushort)begin.MapId)}");
         }
 
-        private async void RunAsyncAction(string label, Func<Task> action)
+        private LoadedMapData LoadBattleMap(uint mapId)
         {
-            if (_busy) return;
-            _busy = true;
-            _statusMessage = $"{label}...";
+            string localMapsDir = Path.Combine(Application.streamingAssetsPath, "LocalMaps");
+            if (_mapElements != null && Directory.Exists(localMapsDir))
+            {
+                string fileName = null;
+                if (_mapFileById != null && _mapFileById.TryGetValue(mapId, out var mapped)) fileName = mapped;
+                else if (mapId == 201) fileName = "town01.map";
+                if (!string.IsNullOrEmpty(fileName))
+                {
+                    string full = Path.Combine(localMapsDir, fileName);
+                    if (File.Exists(full))
+                    {
+                        try { return MapDataLoader.ParseMapBytes(mapId, File.ReadAllBytes(full), _mapElements); }
+                        catch { }
+                    }
+                }
+            }
+            return MapDataLoader.BuildFallbackArena(mapId);
+        }
+
+        // --- Public UI Action Handlers ---
+
+        public void TriggerBattleWorldItem(uint itemId)
+        {
+            if (_sim == null) return;
+            if (_sim.TryUseWorldItem(itemId))
+                FlushOutgoingBattleEvents();
+            else
+                ShowToast(itemId == 63 ? "需要被困且持有针才能自救" : "当前无法使用该局内道具");
+        }
+
+        public void TriggerBattleEmotion(uint emotionId)
+        {
+            if (_sim == null) return;
+            _sim.TriggerLocalEmotion(_store.Uin, emotionId);
+            FlushOutgoingBattleEvents();
+        }
+
+        public void ReturnToRoomAfterSettlement()
+        {
+            _store.ExitBattleToRoom();
+            SetScreen(_store.InRoom ? ClientScreenState.Room : ClientScreenState.MainShell);
+        }
+
+        public async void RequestLogin(string host, int port, uint uin, string password, byte roleId)
+        {
+            _loginView.SetStatus($"正在连接 {host}:{port} ...", busy: true);
+            try
+            {
+                var login = await _session.ConnectAndLoginAsync(host, port, uin, password, roleId);
+                _store.ApplyLogin(login, uin, _session.Nickname, _session.Gender);
+                _loginView.SetStatus("登录成功！", busy: false);
+                SetScreen(ClientScreenState.MainShell);
+                ShowToast($"欢迎回到灵葫堂，{_session.Nickname}！");
+                RequestRefreshLobby();
+                RequestRefreshPets();
+                RequestRefreshSocial();
+            }
+            catch (Exception ex)
+            {
+                _loginView.SetStatus($"登录失败: {ex.Message}", busy: false);
+            }
+        }
+
+        public async void RequestLogout()
+        {
+            await RunSafeAsync(async () =>
+            {
+                if (_store.InRoom) await _session.LeaveRoomAsync(_store.RoomId);
+                await _session.LogoutAsync();
+                _store.ResetAll();
+                SetScreen(ClientScreenState.Login);
+                _loginView.SetStatus("已安全注销。");
+            });
+        }
+
+        public async void RequestRefreshLobby()
+        {
+            await RunSafeAsync(async () =>
+            {
+                var rooms = await _session.RefreshRoomListAsync();
+                _store.ApplyRoomList(rooms);
+                var players = await _session.RefreshPlayerListAsync();
+                _store.ApplyPlayerList(players);
+            }, silent: true);
+        }
+
+        public async void RequestRefreshMoney()
+        {
+            await RunSafeAsync(async () =>
+            {
+                var m = await _session.GetGameMoneyAsync();
+                if (m.ResultId == 0) _store.UpdateMoney(m.Money);
+                ShowToast($"当前糖币余额: {m.Money}");
+            });
+        }
+
+        public async void RequestCreateRoom(string name, RoomPropertyFlag flag, RoomGameType gameType, string password)
+        {
+            await RunSafeAsync(async () =>
+            {
+                ushort rid = await _session.CreateRoomAsync(name, flag, gameType, password);
+                var enter = await _session.EnterRoomAsync(rid, _session.RoleId, password);
+                _store.ApplyEnterRoom(enter, name);
+                if (gameType == RoomGameType.CompetitiveNoItem || gameType == RoomGameType.CompetitiveItem)
+                    await _session.SelectMapAsync(rid, 201, gameType);
+                SetScreen(ClientScreenState.Room);
+            });
+        }
+
+        public async void RequestEnterRoom(ushort roomId, string roomName, string password)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var enter = await _session.EnterRoomAsync(roomId, _session.RoleId, password);
+                if (enter.ResultId != 0)
+                {
+                    ShowToast($"进入房间失败 (code={enter.ResultId})");
+                    return;
+                }
+                _store.ApplyEnterRoom(enter, roomName);
+                SetScreen(ClientScreenState.Room);
+            });
+        }
+
+        public async void RequestQuickJoin(RoomGameType gameType)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var join = await _session.QuickJoinRoomAsync(gameType);
+                if (join.ResultId != 0)
+                {
+                    ShowToast("暂无可快速加入的等待房间，可新建一个房间。");
+                    return;
+                }
+                _store.ApplyJoinRoom(join);
+                SetScreen(ClientScreenState.Room);
+            });
+        }
+
+        public async void RequestLeaveRoom()
+        {
+            await RunSafeAsync(async () =>
+            {
+                if (_store.InRoom) await _session.LeaveRoomAsync(_store.RoomId);
+                _store.ClearRoom();
+                SetScreen(ClientScreenState.MainShell);
+                RequestRefreshLobby();
+            });
+        }
+
+        public async void RequestSelectMap(ushort mapId)
+        {
+            await RunSafeAsync(async () =>
+            {
+                await _session.SelectMapAsync(_store.RoomId, mapId, _store.GameType);
+                ShowToast($"已切换地图: {_catalogs.GetMapName(mapId)}");
+            });
+        }
+
+        public async void RequestChangeRoomType(RoomGameType next)
+        {
+            await RunSafeAsync(async () =>
+            {
+                await _session.ChangeRoomTypeAsync(_store.RoomId, next);
+            });
+        }
+
+        public async void RequestModifyRoom(string name, RoomPropertyFlag flag, string password)
+        {
+            await RunSafeAsync(async () =>
+            {
+                await _session.ModifyRoomAsync(_store.RoomId, name, flag, password, _store.GameType, true, !string.IsNullOrEmpty(password));
+                ShowToast("房间设置已保存");
+            });
+        }
+
+        public async void RequestSetSeatStatus(byte seatId, bool locked)
+        {
+            await RunSafeAsync(async () =>
+            {
+                await _session.SetSeatStatusAsync(_store.RoomId, seatId, locked);
+            });
+        }
+
+        public async void RequestKickPlayer(ushort playerId, uint uin)
+        {
+            await RunSafeAsync(async () =>
+            {
+                ushort res = await _session.KickOffPlayerAsync(_store.RoomId, playerId, uin);
+                if (res != 0) ShowToast("无法踢出该玩家（可能拥有防踢保护/紫钻）");
+            });
+        }
+
+        public async void RequestChangeTeam(byte teamId)
+        {
+            await RunSafeAsync(async () => await _session.ChangeTeamAsync(_store.RoomId, teamId));
+        }
+
+        public async void RequestChangeRole(byte roleId)
+        {
+            await RunSafeAsync(async () => await _session.ChangeRoleAsync(_store.RoomId, roleId));
+        }
+
+        public async void RequestSetReady(bool ready)
+        {
+            await RunSafeAsync(async () => await _session.SetReadyAsync(_store.RoomId, ready));
+        }
+
+        public async void RequestToggleSpecialCard(ushort itemId)
+        {
+            await RunSafeAsync(async () =>
+            {
+                byte next = (byte)(_store.HasActiveItem(itemId) ? 0 : 1);
+                await _session.SetItemStatusAsync(itemId, next);
+                _store.SetInventoryItemStatusLocal(itemId, next, 0);
+                ShowToast(next == 1 ? $"已启用 {_catalogs.GetItemName(itemId)}" : $"已停用 {_catalogs.GetItemName(itemId)}");
+            });
+        }
+
+        public async void RequestCycleChatBackground()
+        {
+            await RunSafeAsync(async () =>
+            {
+                var list = await _session.GetBackgroundListAsync();
+                if (list.BackgroundIds.Count == 0) return;
+                _chatBgCursor = (_chatBgCursor + 1) % list.BackgroundIds.Count;
+                uint bgId = list.BackgroundIds[_chatBgCursor];
+                await _session.UseBackgroundAsync(_store.RoomId, bgId);
+                ShowToast($"聊天室背景已切换为 #{bgId}");
+            });
+        }
+
+        public async void RequestStartGame()
+        {
+            await RunSafeAsync(async () =>
+            {
+                ushort res = await _session.StartGameAsync(_store.RoomId);
+                if (res != 0) ShowToast($"无法开始对局 (code=0x{res:X4}，请确认对手已准备或启用 AI对战卡)");
+            });
+        }
+
+        public async void RequestSendLobbyChat(string text, bool smallBugle)
+        {
+            await RunSafeAsync(async () =>
+            {
+                ushort res = await _session.SendSectionChatAsync(text, smallBugle);
+                if (res != 0) ShowToast("发送大厅聊天失败");
+            });
+        }
+
+        public async void RequestSendRoomChat(string text)
+        {
+            await RunSafeAsync(async () =>
+            {
+                ushort res = await _session.SendRoomChatAsync(_store.RoomId, text);
+                if (res != 0) ShowToast("发送房间聊天失败");
+            });
+        }
+
+        public async void RequestSetItemStatus(ushort itemId, byte newStatus)
+        {
+            await RunSafeAsync(async () =>
+            {
+                await _session.SetItemStatusAsync(itemId, newStatus, _session.RoleId);
+                _store.SetInventoryItemStatusLocal(itemId, newStatus, _session.RoleId);
+                ShowToast(newStatus == 1 ? "道具已装备/启用" : "道具已卸下");
+            });
+        }
+
+        public async void RequestQueryShopCatalog()
+        {
+            await RunSafeAsync(async () =>
+            {
+                var resp = await _session.QueryShopListAsync(_shopCatalogVersion);
+                if (resp.LatestShopListVersion > 0) _shopCatalogVersion = resp.LatestShopListVersion;
+                ShowToast($"商城目录已同步（版本 v{_shopCatalogVersion}）");
+            });
+        }
+
+        public async void RequestBuyCommodity(uint commodityId, string name)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var resp = await _session.BuyCommodityAsync(commodityId, ShopPaymentMethod.GameMoney, _shopCatalogVersion);
+                if (resp.ResultId == 0)
+                {
+                    _store.UpdateMoney(resp.TicketLeft);
+                    ShowToast($"购买成功：{name}！剩余糖币 {resp.TicketLeft}");
+                }
+                else
+                {
+                    ShowToast($"购买失败：{resp.ResultString}");
+                }
+            });
+        }
+
+        public async void RequestBreakEgg(uint hammerId, uint eggId, Action<BreakEggResponseData> onDone)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var resp = await _session.BreakEggAsync(hammerId, eggId);
+                onDone?.Invoke(resp);
+                ShowToast(resp.ResultId == 0 ? $"砸蛋获得 {_catalogs.GetItemName((ushort)resp.ShowItemId)}！" : $"砸蛋失败: {resp.AttachInfo}");
+            });
+        }
+
+        public async void RequestCombineForge(uint productItemId, uint bookItemId, List<uint> materialIds)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var resp = await _session.CombineForgeAsync(0, productItemId, bookItemId, materialIds);
+                ShowToast(resp.ResultId == 0 ? $"合成成功：{_catalogs.GetItemName((ushort)productItemId)}" : $"合成未成功：{resp.Reason}");
+            });
+        }
+
+        public async void RequestForgeAvatar(uint itemId, uint materialId, Action<ForgeResponseData> onDone)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var resp = await _session.ForgeAvatarAsync(0, itemId, materialId);
+                onDone?.Invoke(resp);
+                ShowToast(resp.ResultId == 0 ? "装扮锻造成功！" : $"锻造未成功：{resp.Reason}");
+            });
+        }
+
+        public async void RequestRefreshPets()
+        {
+            await RunSafeAsync(async () =>
+            {
+                var pets = await _session.RefreshPetsAsync();
+                _store.ApplyPets(pets);
+            }, silent: true);
+        }
+
+        public async void RequestHandlePet(PetEventId eventId, uint petId, string param = "")
+        {
+            await RunSafeAsync(async () =>
+            {
+                var resp = await _session.HandlePetAsync(eventId, petId, param ?? string.Empty);
+                if (resp.ResultId == 0 && resp.Pet != null)
+                    _store.ApplySinglePetUpdate(resp.Pet, eventId);
+                ShowToast(resp.ResultId == 0 ? $"灵宠操作成功 ({eventId})" : $"灵宠操作失败：{resp.Reason}");
+            });
+        }
+
+        public async void RequestRefreshSocial()
+        {
+            await RunSafeAsync(async () =>
+            {
+                var fl = await _session.RefreshFriendsAsync();
+                _store.ApplyFriendList(fl);
+                var m = await _session.GetMarriageInfoAsync();
+                _store.ApplyMarriageInfo(m);
+                if (_store.KinIndex > 0)
+                {
+                    var kb = await _session.FetchKinBaseAsync(_store.KinIndex);
+                    _store.ApplyKinBase(kb);
+                    var km = await _session.FetchKinMembersAsync(_store.KinIndex, kb.ListUpdate);
+                    _store.ApplyKinMembers(km);
+                }
+            }, silent: true);
+        }
+
+        public async void RequestAddFriend(uint targetUin, string word)
+        {
+            await RunSafeAsync(async () =>
+            {
+                await _session.AddFriendAsync(targetUin, word);
+                ShowToast($"已向 {targetUin} 发送好友申请");
+            });
+        }
+
+        public async void RequestFindFriend(uint targetUin)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.FindFriendAsync(targetUin);
+                _store.LastFindFriend = res;
+                _socialView.RefreshSocial();
+            });
+        }
+
+        public async void RequestAnswerFriend(uint requesterUin, bool accepted)
+        {
+            await RunSafeAsync(async () =>
+            {
+                await _session.AnswerFriendAsync(requesterUin, accepted);
+                _store.PendingFriendRequests.RemoveAll(r => r.RequesterUin == requesterUin);
+                var fl = await _session.RefreshFriendsAsync();
+                _store.ApplyFriendList(fl);
+            });
+        }
+
+        public async void RequestRemoveFriend(uint targetUin)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.RemoveFriendAsync(targetUin);
+                if (res.ResultId == 0)
+                {
+                    _store.FriendUins.Remove(targetUin);
+                    _store.FriendDetails.Remove(targetUin);
+                    _socialView.RefreshSocial();
+                    ShowToast($"已移除好友 {targetUin}");
+                }
+            });
+        }
+
+        public async void RequestCreateKin(string name, string declaration)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.CreateKinAsync(name, declaration);
+                if (res.ErrorNo == 0 && res.KinIndex > 0)
+                {
+                    var kb = await _session.FetchKinBaseAsync(res.KinIndex);
+                    _store.ApplyKinBase(kb);
+                    var km = await _session.FetchKinMembersAsync(res.KinIndex);
+                    _store.ApplyKinMembers(km);
+                    ShowToast($"家族 [{name}] 创建成功！");
+                }
+                else
+                {
+                    ShowToast($"创建家族失败：{res.Reason}");
+                }
+            });
+        }
+
+        public async void RequestInviteKin(uint targetUin)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.InviteToKinAsync(_store.KinIndex, targetUin);
+                ShowToast(string.IsNullOrEmpty(res.Reason) ? $"已邀请 {targetUin} 加入家族" : res.Reason);
+            });
+        }
+
+        public async void RequestAnswerKinInvite(uint inviterUin, uint kinIndex, bool accepted)
+        {
+            await RunSafeAsync(async () =>
+            {
+                await _session.AnswerKinInviteAsync(inviterUin, kinIndex, accepted);
+                _store.PendingKinInvites.RemoveAll(x => x.KinIndex == kinIndex && x.InviterUin == inviterUin);
+                _socialView.RefreshSocial();
+            });
+        }
+
+        public async void RequestSendKinChat(string message)
+        {
+            await RunSafeAsync(async () => await _session.SendKinChatAsync(_store.KinIndex, message));
+        }
+
+        public async void RequestSetKinNotification(string notice)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.SetKinNotificationAsync(_store.KinIndex, notice);
+                if (res.Result == 0)
+                {
+                    var kb = await _session.FetchKinBaseAsync(_store.KinIndex);
+                    _store.ApplyKinBase(kb);
+                    ShowToast("家族公告已更新");
+                }
+                else ShowToast($"更新失败：{res.Reason}");
+            });
+        }
+
+        public async void RequestKickKinMember(uint targetUin)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.KickKinMemberAsync(_store.KinIndex, targetUin);
+                if (res.Result == 0)
+                {
+                    var km = await _session.FetchKinMembersAsync(_store.KinIndex);
+                    _store.ApplyKinMembers(km);
+                    ShowToast($"已移出成员 {targetUin}");
+                }
+                else ShowToast($"操作失败：{res.Reason}");
+            });
+        }
+
+        public async void RequestExitKin()
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.ExitKinAsync(_store.KinIndex);
+                if (res.Result == 0) { _store.ClearKin(); ShowToast("已退出家族"); }
+                else ShowToast($"退出失败：{res.Reason}");
+            });
+        }
+
+        public async void RequestDismissKin()
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.DismissKinAsync(_store.KinIndex);
+                if (res.Result == 0) { _store.ClearKin(); ShowToast("家族已解散"); }
+                else ShowToast($"解散失败：{res.Reason}");
+            });
+        }
+
+        public async void RequestSpark(uint targetUin, string word)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.RequestSparkAsync(targetUin, word);
+                ShowToast(res.Result == 0 ? $"已向 {targetUin} 发起求婚！" : $"求婚失败 (code={res.Result})");
+            });
+        }
+
+        public async void RequestAnswerSpark(uint proposerUin, bool accepted)
+        {
+            await RunSafeAsync(async () =>
+            {
+                await _session.AnswerSparkAsync(proposerUin, accepted);
+                _store.PendingSparks.RemoveAll(s => s.ProposerUin == proposerUin);
+                var m = await _session.GetMarriageInfoAsync();
+                _store.ApplyMarriageInfo(m);
+            });
+        }
+
+        public async void RequestModifyLoveWord(string loveWord)
+        {
+            await RunSafeAsync(async () =>
+            {
+                if (_store.Marriage == null || !_store.Marriage.IsMarried) { ShowToast("尚未结为伴侣"); return; }
+                var res = await _session.ModifyLoveWordAsync(_store.Marriage.MarriageUin, loveWord);
+                if (res.Result == 0)
+                {
+                    var m = await _session.GetMarriageInfoAsync();
+                    _store.ApplyMarriageInfo(m);
+                    ShowToast("爱情宣言已更新");
+                }
+            });
+        }
+
+        public async void RequestDivorce()
+        {
+            await RunSafeAsync(async () =>
+            {
+                if (_store.Marriage == null || !_store.Marriage.IsMarried) { ShowToast("尚未结为伴侣"); return; }
+                var res = await _session.DivorceAsync(_store.Marriage.MarriageUin);
+                if (res.Result == 0)
+                {
+                    _store.ApplyMarriageInfo(null);
+                    ShowToast("已解除伴侣关系");
+                }
+            });
+        }
+
+        private async Task RunSafeAsync(Func<Task> action, bool silent = false)
+        {
             try
             {
                 await action();
             }
             catch (Exception ex)
             {
-                _statusMessage = $"{label} failed: {ex.Message}";
+                if (!silent) ShowToast($"操作异常: {ex.Message}");
             }
-            finally
-            {
-                _busy = false;
-            }
-        }
-
-        private void OnGUI()
-        {
-            GUI.Box(new Rect(10, 10, 440, 26), $"[QQTang Unity 3D] {_state} | {_statusMessage}");
-
-            switch (_state)
-            {
-                case ClientScreenState.Login: DrawLoginGui(); break;
-                case ClientScreenState.Lobby: DrawLobbyGui(); break;
-                case ClientScreenState.Room: DrawRoomGui(); break;
-                case ClientScreenState.Battle: DrawBattleHud(); break;
-                case ClientScreenState.Settlement: DrawSettlementGui(); break;
-            }
-        }
-
-        private void DrawLoginGui()
-        {
-            GUILayout.BeginArea(new Rect(20, 50, 360, 280), "Login (QQTAUTH1 -> 0x0064)", GUI.skin.window);
-            GUILayout.BeginHorizontal(); GUILayout.Label("Host:", GUILayout.Width(80)); _host = GUILayout.TextField(_host); GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal(); GUILayout.Label("Port:", GUILayout.Width(80)); _portText = GUILayout.TextField(_portText); GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal(); GUILayout.Label("Account UIN:", GUILayout.Width(80)); _uinText = GUILayout.TextField(_uinText); GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal(); GUILayout.Label("Password:", GUILayout.Width(80)); _password = GUILayout.PasswordField(_password, '*'); GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Role (1-4):", GUILayout.Width(80));
-            for (byte r = 1; r <= 4; r++)
-            {
-                if (GUILayout.Toggle(_selectedRoleId == r, $"R{r}", "Button")) _selectedRoleId = r;
-            }
-            GUILayout.EndHorizontal();
-
-            GUI.enabled = !_busy;
-            if (GUILayout.Button("Connect & Login", GUILayout.Height(36)))
-            {
-                if (uint.TryParse(_uinText, out uint uin) && int.TryParse(_portText, out int port))
-                {
-                    RunAsyncAction("Login", async () =>
-                    {
-                        var resp = await _session.ConnectAndLoginAsync(_host, port, uin, _password, _selectedRoleId);
-                        _aiCardActive = resp.Items.Exists(i => i.ItemId == SpecialItemIds.CompetitiveAiCard && i.Status == 1);
-                        var list = await _session.RefreshRoomListAsync();
-                        _rooms = list.Rooms;
-                        _state = ClientScreenState.Lobby;
-                        _statusMessage = $"Logged in as {_session.Nickname} (PlayerID={resp.PlayerId})";
-                    });
-                }
-            }
-            GUI.enabled = true;
-            GUILayout.EndArea();
-        }
-
-        private void DrawLobbyGui()
-        {
-            GUILayout.BeginArea(new Rect(20, 50, 480, 420), $"Lobby - {_session.Nickname} (ID={_session.PlayerId})", GUI.skin.window);
-            GUILayout.BeginHorizontal();
-            _newRoomName = GUILayout.TextField(_newRoomName, GUILayout.Width(160));
-            _createFreeRule = GUILayout.Toggle(_createFreeRule, "Free Rule");
-            GUI.enabled = !_busy;
-            if (GUILayout.Button("Create Room"))
-            {
-                RunAsyncAction("CreateRoom", async () =>
-                {
-                    var flag = _createFreeRule ? RoomPropertyFlag.FreeRule : RoomPropertyFlag.Standard;
-                    ushort rid = await _session.CreateRoomAsync(_newRoomName, flag, RoomGameType.CompetitiveNoItem);
-                    await _session.SelectMapAsync(rid, _currentMapId, RoomGameType.CompetitiveNoItem);
-                    _currentRoomId = rid;
-                    _roomOwnerId = _session.PlayerId;
-                    _roomFreeRule = _createFreeRule;
-                    _isReady = false;
-                    _roomMembers = new List<RoomMemberData>
-                    {
-                        new RoomMemberData { Uin = _session.Uin, Nickname = _session.Nickname, PlayerId = _session.PlayerId, TeamId = 1, SeatId = 1, GameInfo = new GameInfoData { RoleId = _selectedRoleId } }
-                    };
-                    _state = ClientScreenState.Room;
-                    _statusMessage = $"Created Room #{rid} (Map {_currentMapId})";
-                });
-            }
-            if (GUILayout.Button("Refresh"))
-            {
-                RunAsyncAction("RefreshRooms", async () =>
-                {
-                    var list = await _session.RefreshRoomListAsync();
-                    _rooms = list.Rooms;
-                    _statusMessage = $"Found {_rooms.Count} rooms.";
-                });
-            }
-            GUI.enabled = true;
-            GUILayout.EndHorizontal();
-
-            GUILayout.Space(8);
-            GUILayout.Label($"Rooms ({_rooms.Count}):");
-            foreach (var r in _rooms)
-            {
-                GUILayout.BeginHorizontal("box");
-                GUILayout.Label($"#{r.RoomId} {r.Name} | Map:{r.MapId} | {r.CurrentPlayers}/{r.Capacity}");
-                GUI.enabled = !_busy;
-                if (GUILayout.Button("Join", GUILayout.Width(70)))
-                {
-                    ushort targetId = r.RoomId;
-                    RunAsyncAction("EnterRoom", async () =>
-                    {
-                        var res = await _session.EnterRoomAsync(targetId, _selectedRoleId);
-                        if (res.ResultId != 0) throw new Exception($"ResultID={res.ResultId}");
-                        _currentRoomId = res.RoomId;
-                        _currentMapId = res.MapId;
-                        _roomOwnerId = res.RoomOwnerId;
-                        _roomFreeRule = (res.RoomFlag & (byte)RoomPropertyFlag.FreeRule) != 0;
-                        _roomMembers = res.Players;
-                        _isReady = false;
-                        _state = ClientScreenState.Room;
-                        _statusMessage = $"Joined Room #{res.RoomId}";
-                    });
-                }
-                GUI.enabled = true;
-                GUILayout.EndHorizontal();
-            }
-            GUILayout.EndArea();
-        }
-
-        private void DrawRoomGui()
-        {
-            bool isOwner = _roomOwnerId == _session.PlayerId;
-            GUILayout.BeginArea(new Rect(20, 50, 480, 420), $"Room #{_currentRoomId} | Map {_currentMapId} | Owner={_roomOwnerId}", GUI.skin.window);
-
-            GUILayout.Label("Players:");
-            foreach (var m in _roomMembers)
-            {
-                string tag = m.PlayerId == _roomOwnerId ? "[OWNER]" : (m.Status == 1 ? "[READY]" : "[WAIT]");
-                GUILayout.Label($"  Seat {m.SeatId} | P{m.PlayerId} {m.Nickname} | Team {m.TeamId} | Role {m.GameInfo?.RoleId ?? 1} {tag}");
-            }
-
-            GUILayout.Space(8);
-            GUI.enabled = !_busy;
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Team:", GUILayout.Width(45));
-            for (byte t = 1; t <= 4; t++)
-            {
-                byte teamChoice = t;
-                if (GUILayout.Button($"T{t}"))
-                    RunAsyncAction("ChangeTeam", () => _session.ChangeTeamAsync(_currentRoomId, teamChoice));
-            }
-            GUILayout.EndHorizontal();
-
-            if (isOwner)
-            {
-                GUILayout.BeginHorizontal();
-                GUILayout.Label("Map:", GUILayout.Width(45));
-                foreach (ushort mid in new ushort[] { 201, 202, 203, 101 })
-                {
-                    ushort mapChoice = mid;
-                    if (GUILayout.Button($"{mid}"))
-                        RunAsyncAction("SelectMap", async () => { await _session.SelectMapAsync(_currentRoomId, mapChoice); _currentMapId = mapChoice; });
-                }
-                GUILayout.EndHorizontal();
-
-                if (GUILayout.Button(_aiCardActive ? "AI Card (30099): ON" : "Activate AI Card (30099)"))
-                {
-                    byte nextStatus = (byte)(_aiCardActive ? 0 : 1);
-                    RunAsyncAction("ToggleAI", async () => { await _session.SetItemStatusAsync(SpecialItemIds.CompetitiveAiCard, nextStatus); _aiCardActive = nextStatus == 1; });
-                }
-
-                if (GUILayout.Button("START GAME", GUILayout.Height(36)))
-                {
-                    RunAsyncAction("StartGame", async () =>
-                    {
-                        ushort res = await _session.StartGameAsync(_currentRoomId);
-                        if (res != 0) _statusMessage = $"Start rejected (0x{res:X4}) - need opponent or AI card.";
-                    });
-                }
-            }
-            else
-            {
-                if (GUILayout.Button(_isReady ? "Cancel Ready" : "READY", GUILayout.Height(36)))
-                {
-                    bool nextReady = !_isReady;
-                    RunAsyncAction("Ready", async () => { await _session.SetReadyAsync(_currentRoomId, nextReady); _isReady = nextReady; });
-                }
-            }
-
-            if (GUILayout.Button("Leave Room"))
-            {
-                RunAsyncAction("LeaveRoom", async () =>
-                {
-                    await _session.LeaveRoomAsync(_currentRoomId);
-                    _arenaView.ClearArena();
-                    _state = ClientScreenState.Lobby;
-                });
-            }
-            GUI.enabled = true;
-            GUILayout.EndArea();
-        }
-
-        private void DrawBattleHud()
-        {
-            if (_sim == null) return;
-            var me = _sim.LocalActor;
-            float remainSec = Mathf.Max(0f, (_sim.RoundDurationMs - _sim.ElapsedMs) / 1000f);
-            string artSrc = _art.GetResolvedSource("characters/role_0_S");
-
-            GUILayout.BeginArea(new Rect(10, 42, 290, 175), "Rule-1 Battle HUD", GUI.skin.window);
-            GUILayout.Label($"Time Left: {remainSec:F1}s | Art: {artSrc}");
-            if (_sim.ElapsedMs < Rule1BattleSimulation.RoundStartClockMs)
-                GUILayout.Label($"READY... {(Rule1BattleSimulation.RoundStartClockMs - _sim.ElapsedMs) / 1000f:F1}s");
-            if (me != null)
-            {
-                GUILayout.Label($"Me: P{me.PlayerId} Team {me.TeamId} [{me.State}]");
-                GUILayout.Label($"Bombs: {me.BombCapacity}/{me.MaxBombCapacity} | Power: {me.BombPower} | Speed: {me.SpeedRate}");
-            }
-            GUILayout.Label("Controls: WASD / Arrows = Move, Space = Bomb");
-            GUILayout.EndArea();
-        }
-
-        private void DrawSettlementGui()
-        {
-            GUILayout.BeginArea(new Rect(Screen.width * 0.5f - 180, Screen.height * 0.5f - 120, 360, 240), "Match Settlement", GUI.skin.window);
-            if (_lastSettlement != null)
-            {
-                foreach (var r in _lastSettlement.Results)
-                    GUILayout.Label($"Player {r.PlayerId}: {r.Result} (Points: +{r.Point})");
-            }
-            GUILayout.Space(12);
-            if (GUILayout.Button("Return to Room", GUILayout.Height(36)))
-            {
-                _arenaView.ClearArena();
-                _sim = null;
-                _state = ClientScreenState.Room;
-            }
-            GUILayout.EndArea();
         }
     }
 }

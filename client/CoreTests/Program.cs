@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using Qqtang.Core.Battle;
 using Qqtang.Core.Network;
 using Qqtang.Core.Protocol;
+using Qqtang.Core.State;
 
 namespace Qqtang.Core.Tests
 {
@@ -26,6 +27,7 @@ namespace Qqtang.Core.Tests
                 TestUdpChecksumAndRoundTrip();
                 TestGameplayBatchRoundTrip();
                 TestRule1SimulationMechanics();
+                TestStaticCatalogs();
                 TestRealMapFileIfPresent();
 
                 if (!args.Contains("--unit-only"))
@@ -155,7 +157,37 @@ namespace Qqtang.Core.Tests
             sim.Step(3050, BattleDirection.None, false);
             Assert(sim.Bombs.Count == 0 && sim.Flames.Count > 0, "Bomb should detonate into flames");
             Assert(sim.OutgoingTcpEvents.Any(e => e.schemaId == GameEventSchemas.NotifyBombExplode), "Should emit NotifyBombExplode");
-            Pass("Rule-1 BattleSimulation (move, bomb, fuse, blast)");
+
+            // Test extended mechanics: Needle self-rescue (63), Shield (41), Remote Relive (0x0FBA), Emotion (0x1194)
+            sim.LocalActor.State = ActorLifeState.Trapped;
+            sim.LocalActor.NeedleCount = 1;
+            Assert(sim.TryUseWorldItem(63), "Needle self-rescue should succeed");
+            Assert(sim.LocalActor.State == ActorLifeState.Active && sim.LocalActor.NeedleCount == 0, "Actor should be active after needle");
+            sim.LocalActor.ShieldCount = 1;
+            Assert(sim.TryUseWorldItem(41), "Shield activation should succeed");
+            Assert(sim.LocalActor.IsInvulnerable(sim.ElapsedMs), "Actor should be invulnerable while shield active");
+            sim.TriggerLocalEmotion(1000001, 5);
+            Assert(sim.LocalActor.ActiveEmotionId == 5, "Emotion ID should be set");
+            var reliveBody = new PlayerReliveEventData { PlayerId = 2, ClientTime = sim.ElapsedMs, Row = 1, Col = 1 }.Marshal();
+            sim.GetActor(2).State = ActorLifeState.Dead;
+            sim.ApplyRemoteMessage(2, ExtendedGameEventSchemas.NotifyPlayerRelive, reliveBody);
+            Assert(sim.GetActor(2).State == ActorLifeState.Active, "Remote relive should revive actor");
+
+            Pass("Rule-1 BattleSimulation (move, bomb, fuse, blast, needle, shield, relive, emote)");
+        }
+
+        private static void TestStaticCatalogs()
+        {
+            string repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+            string serverDir = Path.Combine(repoRoot, "server");
+            var catalogs = new StaticCatalogs();
+            catalogs.LoadFromDirectories(serverDir, @"C:\Users\luyua\Downloads\QQTang-Local\runtime\client-patched");
+            Assert(catalogs.Maps.Count >= 300, $"Expected >=300 maps, got {catalogs.Maps.Count}");
+            Assert(catalogs.ItemsById.Count >= 2000, $"Expected >=2000 items, got {catalogs.ItemsById.Count}");
+            Assert(catalogs.CombineRecipes.Count >= 10, $"Expected >=10 combine recipes, got {catalogs.CombineRecipes.Count}");
+            Assert(catalogs.PetsByTypeId.Count >= 10, $"Expected >=10 pet types, got {catalogs.PetsByTypeId.Count}");
+            Assert(StaticCatalogs.GetRankTitle(1).Contains("QQ堂平民"), "Rank title mismatch");
+            Pass($"StaticCatalogs (maps={catalogs.Maps.Count}, items={catalogs.ItemsById.Count}, recipes={catalogs.CombineRecipes.Count}, pets={catalogs.PetsByTypeId.Count}, shop={catalogs.ShopCommodities.Count})");
         }
 
         private static void TestRealMapFileIfPresent()
@@ -176,13 +208,25 @@ namespace Qqtang.Core.Tests
             Pass($"Real .map parser ({elements.Count} elements, {parsed.Width}x{parsed.Height}, spawnsA={parsed.SpawnGroupA.Count})");
         }
 
+        private static readonly Random PortRng = new Random();
+
         private static int FindFreeTcpPort()
         {
-            var l = new TcpListener(IPAddress.Loopback, 0);
-            l.Start();
-            int port = ((IPEndPoint)l.LocalEndpoint).Port;
-            l.Stop();
-            return port;
+            int start = PortRng.Next(28000, 34000);
+            for (int i = 0; i < 500; i++)
+            {
+                int port = 28000 + ((start - 28000 + i) % 6000);
+                try
+                {
+                    var l = new TcpListener(IPAddress.Loopback, port);
+                    l.Start();
+                    l.Stop();
+                    using var u = new UdpClient(new IPEndPoint(IPAddress.Loopback, port));
+                    return port;
+                }
+                catch { }
+            }
+            throw new InvalidOperationException("Could not find a free TCP+UDP port.");
         }
 
         private static async Task TestLiveGoServerEndToEndAsync()
@@ -218,6 +262,7 @@ namespace Qqtang.Core.Tests
 
                 // 2. Write isolated test server config on ephemeral port
                 int gamePort = FindFreeTcpPort();
+                int shopPort = FindFreeTcpPort();
                 int gmPort = FindFreeTcpPort();
                 string dbPath = Path.Combine(tempDir, "test.sqlite");
                 string logPath = Path.Combine(tempDir, "server.jsonl");
@@ -232,7 +277,7 @@ namespace Qqtang.Core.Tests
   ""seed_uin"": 1000001,
   ""initial_accounts"": [
     {{ ""uin"": 1000001, ""nickname"": ""PlayerOne"", ""gender"": 1 }},
-    {{ ""uin"": 1000002, ""nickname"": ""PlayerTwo"", ""gender"": 0 }}
+    {{ ""uin"": 1000002, ""nickname"": ""PlayerTwo"", ""gender"": 0, ""identity"": 0 }}
   ],
   ""adventure_rules_path"": ""{EscapeJson(Path.Combine(serverDir, "configs", "adventure-rules.json"))}"",
   ""role_rules_path"": ""{EscapeJson(Path.Combine(serverDir, "configs", "role-rules.json"))}"",
@@ -245,7 +290,10 @@ namespace Qqtang.Core.Tests
   ""directory_hall"": {{
     ""server_ip"": ""127.0.0.1"",
     ""server_port"": {gamePort},
-    ""server_udp_port"": {gamePort}
+    ""server_udp_port"": {gamePort},
+    ""shop_server_id"": 2,
+    ""shop_server_port"": {shopPort},
+    ""shop_server_udp_port"": {shopPort}
   }},
   ""max_packet_bytes"": 1048576,
   ""idle_timeout_ms"": 60000,
@@ -253,7 +301,7 @@ namespace Qqtang.Core.Tests
     ""nickname"": ""PlayerOne"", ""gender"": 1, ""icon_id"": 0, ""player_id"": 1, ""identity"": 8192,
     ""section_id"": 1, ""room_count"": 100, ""minimum_room_id"": 1, ""tutorial_completed"": true,
     ""game_info"": {{ ""wins"": 10, ""losses"": 2, ""draws"": 1, ""points"": 5000, ""money"": 99999, ""degree"": 5, ""role_id"": 1 }},
-    ""inventory"": [ {{ ""id"": 99, ""quantity"": 1 }}, {{ ""id"": 30098, ""quantity"": 1 }} ]
+    ""inventory"": [ {{ ""id"": 99, ""quantity"": 1 }}, {{ ""id"": 30098, ""quantity"": 1 }}, {{ ""id"": 9001, ""quantity"": 1 }}, {{ ""id"": 9011, ""quantity"": 1 }}, {{ ""id"": 2235, ""quantity"": 2 }}, {{ ""id"": 9020, ""quantity"": 2 }}, {{ ""id"": 9021, ""quantity"": 2 }} ]
   }},
   ""listeners"": [
     {{
@@ -269,6 +317,16 @@ namespace Qqtang.Core.Tests
         ""qqt_start_game_success"": true,
         ""qqt_game_begin"": true,
         ""qqt_game_event_relay"": true
+      }}
+    }},
+    {{
+      ""name"": ""shop-service"",
+      ""network"": ""tcp"",
+      ""address"": ""127.0.0.1:{shopPort}"",
+      ""response"": {{
+        ""qqt_login_success"": true,
+        ""qqt_shop_catalog"": true,
+        ""qqt_shop_type2_session"": true
       }}
     }},
     {{
@@ -407,6 +465,115 @@ namespace Qqtang.Core.Tests
                 Assert(p1Res.Result == GameResultCode.Win && p2Res.Result == GameResultCode.Loss,
                     $"Unexpected settlement: P1={p1Res.Result} P2={p2Res.Result}");
                 Pass($"Live Match Settlement (P1={p1Res.Result}, P2={p2Res.Result})");
+
+                // 8. Live Room Chat, Seat Lock, ModifyRoom, ChangeRoomType, KickOffPlayer, QuickJoin
+                c1.ShopPort = shopPort;
+                c2.ShopPort = shopPort;
+                var store1 = new ClientStateStore();
+                store1.ApplyLogin(login1, c1.Uin, c1.Nickname, c1.Gender);
+
+                ushort chatRes = await c1.SendRoomChatAsync(roomId, "HelloRoom");
+                Assert(chatRes == 0, $"RoomChat rejected: {chatRes}");
+                var rChat = await WaitForCommandAsync(c2, GameCommands.RoomChatNotify, p => RoomChatNotifyData.Parse(p.Payload));
+                Assert(rChat.Content == "HelloRoom", $"RoomChat content mismatch: {rChat.Content}");
+
+                Assert(await c1.SetSeatStatusAsync(roomId, 8, true) == 0, "SetSeatStatus lock failed");
+                Assert(await c1.ModifyRoomAsync(roomId, "DaoistArena", RoomPropertyFlag.FreeRule, "", RoomGameType.CompetitiveNoItem, true, false) == 0, "ModifyRoom failed");
+                Assert(await c1.ChangeRoomTypeAsync(roomId, RoomGameType.Chat) == 0, "ChangeRoomType to Chat failed");
+                var bgs = await c1.GetBackgroundListAsync();
+                Assert(bgs.BackgroundIds.Count > 0, "BackgroundList empty in chat room");
+                Assert(await c1.UseBackgroundAsync(roomId, bgs.BackgroundIds[1]) == 0, "UseBackground failed");
+                Assert(await c1.ChangeRoomTypeAsync(roomId, RoomGameType.CompetitiveNoItem) == 0, "ChangeRoomType restore failed");
+                Assert(await c1.KickOffPlayerAsync(roomId, c2.PlayerId, c2.Uin) == 0, "KickOffPlayer failed");
+                var kicked = await WaitForCommandAsync(c2, ExtendedGameCommands.KickOffRoomNotify, p => KickOffRoomNotifyData.Parse(p.Payload));
+                Assert(kicked.PlayerUin == c2.Uin, "KickOffRoomNotify UIN mismatch");
+
+                var qj = await c2.QuickJoinRoomAsync(RoomGameType.CompetitiveNoItem);
+                Assert(qj.ResultId == 0 && qj.RoomId == roomId, $"QuickJoin failed: res={qj.ResultId}");
+                await c2.LeaveRoomAsync(roomId);
+                await c1.LeaveRoomAsync(roomId);
+                Pass($"Live Room Extended (RoomChat, SeatLock, ModifyRoom, ChatRoom+Bg={bgs.BackgroundIds.Count}, Kick, QuickJoin)");
+
+                // 9. Live Lobby PlayerList + SectionChat
+                var pList = await c1.RefreshPlayerListAsync();
+                Assert(pList.ResultId == 0 && pList.Players.Count >= 2, $"PlayerList expected >=2, got {pList.Players.Count}");
+                Assert(await c1.SendSectionChatAsync("HelloLobby") == 0, "SectionChat failed");
+                var sChat = await WaitForCommandAsync(c2, ExtendedGameCommands.SectionChatNotify, p => SectionChatNotifyData.Parse(p.Payload));
+                Assert(sChat.Content == "HelloLobby", $"SectionChat mismatch: {sChat.Content}");
+                Pass($"Live Lobby Extended (PlayerList={pList.Players.Count}, SectionChat)");
+
+                // 10. Live Economy + Shop (auxiliary port) + BreakEgg + Pets
+                var money = await c1.GetGameMoneyAsync();
+                Assert(money.ResultId == 0 && money.Money > 0, $"GetGameMoney failed: {money.Money}");
+                var shopList = await c1.QueryShopListAsync();
+                Assert(shopList.ResultId == 0 && shopList.LatestShopListVersion > 0, $"ShopList failed: res={shopList.ResultId}");
+                var bought = await c1.BuyCommodityAsync(294, ShopPaymentMethod.GameMoney, shopList.LatestShopListVersion);
+                Assert(bought.ResultId == 0 && bought.ItemIds.Contains(294u), $"ShopBuy failed: res={bought.ResultId} msg={bought.ResultString}");
+                var itemPush = await WaitForCommandAsync(c1, ExtendedGameCommands.PlayerItemAddNotify, p => PlayerItemAddNotifyData.Parse(p.Payload));
+                store1.ApplyServerPacket(new DecodedLocalPacket { Command = ExtendedGameCommands.PlayerItemAddNotify, Payload = Array.Empty<byte>() });
+                store1.UpsertInventoryItems(itemPush.Items);
+                Assert(store1.OwnsItem(294), "Purchased item 294 not reflected in ClientStateStore");
+
+                var eggRes = await c1.BreakEggAsync(9011, 9001);
+                Assert(eggRes.ResultId == 0 && eggRes.ShowItemId > 0, $"BreakEgg failed: res={eggRes.ResultId}");
+                var pets = await c1.RefreshPetsAsync();
+                Assert(pets != null, "RefreshPets returned null");
+                Pass($"Live Economy/Shop/Egg/Pets (ShopVer={shopList.LatestShopListVersion}, Bought=294, EggReward={eggRes.ShowItemId}, Pets={pets.Pets.Count})");
+
+                // 11. Live Friends (Add -> Notify -> Answer -> FriendUpdate -> FindFriend -> Remove)
+                await c1.AddFriendAsync(c2.Uin, "HiFriend");
+                var fReq = await WaitForCommandAsync(c2, ExtendedGameCommands.AddFriend, p => AddFriendRequestNotifyData.Parse(p.Payload));
+                Assert(fReq.RequesterUin == c1.Uin && fReq.Word == "HiFriend", "AddFriend notification mismatch");
+                var fAns = await c2.AnswerFriendAsync(c1.Uin, true);
+                Assert(fAns.ResultId == 0, $"AnswerFriend failed: {fAns.ResultId}");
+                var fUpd = await WaitForCommandAsync(c1, ExtendedGameCommands.FriendUpdateNotify, p => FriendUpdateNotifyData.Parse(p.Payload));
+                Assert(fUpd.FriendUin == c2.Uin && fUpd.Online, "FriendUpdateNotify mismatch");
+                var found = await c1.FindFriendAsync(c2.Uin);
+                Assert(found.ResultId == 0 && found.FriendUin == c2.Uin, $"FindFriend failed: {found.ResultId}");
+                var fList = await c1.RefreshFriendsAsync();
+                Assert(fList.FriendUins.Contains(c2.Uin), "FriendList missing C2");
+                var rem = await c1.RemoveFriendAsync(c2.Uin);
+                Assert(rem.ResultId == 0, $"RemoveFriend failed: {rem.ResultId}");
+                Pass("Live Friends (Add, Answer, UpdateNotify, FindFriend, List, Remove)");
+
+                // 12. Live Kin (Create -> FetchBase -> FetchMembers -> Declaration -> Notification -> Chat -> Top -> Dismiss)
+                var kinCreate = await c1.CreateKinAsync("DaoistClan", "WayOfTao");
+                Assert(kinCreate.ErrorNo == 0 && kinCreate.KinIndex > 0, $"CreateKin failed: err={kinCreate.ErrorNo} reason={kinCreate.Reason}");
+                var kinBase = await c1.FetchKinBaseAsync(kinCreate.KinIndex);
+                Assert(kinBase.Index == kinCreate.KinIndex && kinBase.Name == "DaoistClan", $"FetchKinBase mismatch: {kinBase.Name}");
+                var kinMembers = await c1.FetchKinMembersAsync(kinCreate.KinIndex);
+                Assert(kinMembers.Members.Count == 1 && kinMembers.Members[0].Uin == c1.Uin, "FetchKinMembers mismatch");
+                var declRes = await c1.SetKinDeclarationAsync(kinCreate.KinIndex, "NewDecl");
+                Assert(declRes.Result == 0, $"SetKinDeclaration failed: {declRes.Result}");
+                var notifRes = await c1.SetKinNotificationAsync(kinCreate.KinIndex, "WelcomeAll");
+                Assert(notifRes.Result == 0, $"SetKinNotification failed: {notifRes.Result}");
+                await c1.SendKinChatAsync(kinCreate.KinIndex, "HelloKin");
+                var kChat = await WaitForCommandAsync(c1, ExtendedGameCommands.KinChatNotify, p => KinChatNotifyData.Parse(p.Payload));
+                Assert(kChat.Message == "HelloKin", $"KinChat mismatch: {kChat.Message}");
+                var kTop = await c1.FetchKinTopAsync(kinCreate.KinIndex);
+                Assert(kTop.Result == 0, $"FetchKinTop failed: {kTop.Result}");
+                var dismissRes = await c1.DismissKinAsync(kinCreate.KinIndex);
+                Assert(dismissRes.Result == 0, $"DismissKin failed: {dismissRes.Result}");
+                Pass($"Live Kin (Create#{kinCreate.KinIndex}, Base, Members, Decl, Notif, Chat, Top, Dismiss)");
+
+                // 13. Live Marriage (Info -> RequestSpark -> NotifySpark -> AnswerSpark -> ModifyLoveWord -> Divorce) + Logout
+                var mInit = await c1.GetMarriageInfoAsync();
+                Assert(!mInit.IsMarried, "Should not be married initially");
+                var sparkRes = await c1.RequestSparkAsync(c2.Uin, "MarryMe");
+                Assert(sparkRes.Result == 0, $"RequestSpark failed: {sparkRes.Result}");
+                var sparkPush = await WaitForCommandAsync(c2, ExtendedGameCommands.NotifySpark, p => SparkNotifyData.Parse(p.Payload));
+                Assert(sparkPush.ProposerUin == c1.Uin && sparkPush.Word == "MarryMe", "NotifySpark mismatch");
+                var ansSpark = await c2.AnswerSparkAsync(c1.Uin, true);
+                Assert(ansSpark.Result == 0, $"AnswerSpark failed: {ansSpark.Result}");
+                var mAfter = await c1.GetMarriageInfoAsync();
+                Assert(mAfter.IsMarried && mAfter.MarriageUin == c2.Uin, "MarriageInfo should show C2 as spouse");
+                var lw = await c1.ModifyLoveWordAsync(c2.Uin, "Forever");
+                Assert(lw.Result == 0, $"ModifyLoveWord failed: {lw.Result}");
+                var div = await c1.DivorceAsync(c2.Uin);
+                Assert(div.Result == 0, $"Divorce failed: {div.Result}");
+                await c1.LogoutAsync();
+                await c2.LogoutAsync();
+                Pass("Live Marriage (Info, Spark, Answer, LoveWord, Divorce) & Clean Logout");
             }
             finally
             {

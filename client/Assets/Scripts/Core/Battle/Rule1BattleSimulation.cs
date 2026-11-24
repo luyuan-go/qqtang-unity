@@ -54,11 +54,20 @@ namespace Qqtang.Core.Battle
         public ushort MoveSequence;
         public int KillCount;
         public int RescueCount;
+        public int NeedleCount;
+        public int RemoteDetonatorCount;
+        public int ShieldCount;
+        public bool CanKickBomb;
+        public uint ShieldActiveUntilMs;
+        public uint ActiveEmotionId;
+        public uint EmotionExpireAtMs;
 
         // Remote interpolation target
         public int TargetPosX;
         public int TargetPosY;
         public bool HasRemoteTarget;
+
+        public bool IsInvulnerable(uint nowMs) => nowMs < ShieldActiveUntilMs;
 
         public GridCell CurrentCell => new GridCell(
             Math.Max(0, PosY / Rule1BattleSimulation.CellSizePixels),
@@ -171,10 +180,170 @@ namespace Qqtang.Core.Battle
         public List<(ushort schemaId, byte[] body)> OutgoingTcpEvents { get; } = new List<(ushort, byte[])>();
 
         private uint _nextBombId = 1;
+        private ushort _pushSequence = 1;
         private BattleDirection _lastSentMoveDir = BattleDirection.None;
         private bool _lastSentMoving;
         private uint _lastMoveBroadcastMs;
         private readonly HashSet<(ushort owner, uint placedAt, byte r, byte c)> _seenRemoteBombs = new HashSet<(ushort, uint, byte, byte)>();
+        private readonly Dictionary<uint, ushort> _uinToPlayerId = new Dictionary<uint, ushort>();
+
+        public void RegisterParticipantUin(uint uin, ushort playerId)
+        {
+            if (uin != 0 && playerId != 0) _uinToPlayerId[uin] = playerId;
+        }
+
+        public bool TryUseWorldItem(uint itemId)
+        {
+            BattleActor local = LocalActor;
+            if (local == null || IsFinished || ElapsedMs < RoundStartClockMs) return false;
+
+            if (itemId == 63) // Needle self-rescue while trapped
+            {
+                if (local.State != ActorLifeState.Trapped || local.NeedleCount <= 0) return false;
+                local.NeedleCount--;
+                local.State = ActorLifeState.Active;
+                local.TrappedElapsedMs = 0;
+                local.ShieldActiveUntilMs = ElapsedMs + 800;
+            }
+            else if (itemId == 64) // Remote detonate own active bombs
+            {
+                if (local.State != ActorLifeState.Active || local.RemoteDetonatorCount <= 0) return false;
+                local.RemoteDetonatorCount--;
+                foreach (var b in Bombs)
+                    if (b.OwnerId == local.PlayerId && b.ExplodeAtMs > ElapsedMs)
+                        b.ExplodeAtMs = ElapsedMs;
+            }
+            else if (itemId == 41 || itemId == 42 || itemId == 43) // Protective shield / field charm
+            {
+                if (local.State != ActorLifeState.Active || local.ShieldCount <= 0) return false;
+                local.ShieldCount--;
+                local.ShieldActiveUntilMs = ElapsedMs + 3000;
+            }
+            else
+            {
+                return false;
+            }
+
+            var ev = new WorldUseItemEventData
+            {
+                PlayerId = local.PlayerId,
+                ClientTime = ElapsedMs,
+                ItemId = itemId,
+                PosX = (ushort)Math.Max(0, local.PosX),
+                PosY = (ushort)Math.Max(0, local.PosY)
+            };
+            byte[] body = ev.Marshal();
+            OutgoingPeerEvents.Add((ExtendedGameEventSchemas.RequestUseItem, body));
+            OutgoingTcpEvents.Add((ExtendedGameEventSchemas.RequestUseItem, body));
+            return true;
+        }
+
+        public void TriggerLocalEmotion(uint localUin, uint emotionId)
+        {
+            BattleActor local = LocalActor;
+            if (local == null || emotionId == 0) return;
+            local.ActiveEmotionId = emotionId;
+            local.EmotionExpireAtMs = ElapsedMs + 3000;
+            if (localUin != 0)
+            {
+                var ev = new UseEmotionEventData { Uin = localUin, Time = ElapsedMs, EmotionId = emotionId };
+                OutgoingTcpEvents.Add((ExtendedGameEventSchemas.NotifyUseEmotion, ev.Marshal()));
+            }
+        }
+
+        public bool TryKickAdjacentBomb(BattleDirection dir)
+        {
+            BattleActor local = LocalActor;
+            if (local == null || local.State != ActorLifeState.Active || !local.CanKickBomb || dir == BattleDirection.None)
+                return false;
+            var (dr, dc) = DirectionDelta(dir);
+            GridCell from = new GridCell(local.CurrentCell.Row + dr, local.CurrentCell.Col + dc);
+            ActiveBomb bomb = Bombs.Find(b => b.Cell.Equals(from));
+            if (bomb == null) return false;
+
+            GridCell to = from;
+            while (true)
+            {
+                GridCell next = new GridCell(to.Row + dr, to.Col + dc);
+                if (!Map.InBounds(next.Row, next.Col)) break;
+                if (Map.GetCell(next.Row, next.Col).Collision != CellCollision.Open) break;
+                if (HasBombAt(next)) break;
+                to = next;
+            }
+            if (to.Equals(from)) return false;
+
+            bomb.Cell = to;
+            var msg = new MoveBombEventData
+            {
+                PlayerId = local.PlayerId,
+                ClientTime = (ushort)(ElapsedMs & 0xFFFF),
+                FromRow = (ushort)from.Row,
+                FromCol = (ushort)from.Col,
+                ToRow = (ushort)to.Row,
+                ToCol = (ushort)to.Col,
+                Direction = ToNativeDirectionCode(dir),
+                BombPlayerId = bomb.OwnerId,
+                BombTime = bomb.PlacedAtMs,
+                BombPower = bomb.Power
+            };
+            byte[] body = msg.Marshal();
+            OutgoingPeerEvents.Add((ExtendedGameEventSchemas.RequestMoveBomb, body));
+            OutgoingTcpEvents.Add((ExtendedGameEventSchemas.RequestMoveBomb, body));
+            return true;
+        }
+
+        public bool TryPushAdjacentMapElement(BattleDirection dir)
+        {
+            BattleActor local = LocalActor;
+            if (local == null || local.State != ActorLifeState.Active || dir == BattleDirection.None) return false;
+            var (dr, dc) = DirectionDelta(dir);
+            GridCell src = new GridCell(local.CurrentCell.Row + dr, local.CurrentCell.Col + dc);
+            GridCell dst = new GridCell(src.Row + dr, src.Col + dc);
+            if (!Map.InBounds(src.Row, src.Col) || !Map.InBounds(dst.Row, dst.Col)) return false;
+            var srcTile = Map.GetCell(src.Row, src.Col);
+            var dstTile = Map.GetCell(dst.Row, dst.Col);
+            if (!srcTile.Pushable || dstTile.Collision != CellCollision.Open || HasBombAt(dst)) return false;
+
+            ApplyMapElementSlide(src, dst);
+            var req = new MoveMapElementEventData
+            {
+                PlayerId = local.PlayerId,
+                ClientTime = ElapsedMs,
+                ElementId = srcTile.MapElementId != 0 ? srcTile.MapElementId : 1u,
+                Row = (ushort)src.Row,
+                Col = (ushort)src.Col,
+                Direction = ToNativeDirectionCode(dir),
+                Sequence = _pushSequence++
+            };
+            OutgoingPeerEvents.Add((ExtendedGameEventSchemas.RequestMoveMapElement, req.MarshalRequest()));
+            OutgoingTcpEvents.Add((ExtendedGameEventSchemas.RequestMoveMapElement, req.MarshalRequest()));
+            return true;
+        }
+
+        private void ApplyMapElementSlide(GridCell src, GridCell dst)
+        {
+            if (!Map.InBounds(src.Row, src.Col) || !Map.InBounds(dst.Row, dst.Col)) return;
+            int si = src.Row * Map.Width + src.Col;
+            int di = dst.Row * Map.Width + dst.Col;
+            var s = Map.Cells[si];
+            var d = Map.Cells[di];
+            d.Collision = s.Collision;
+            d.FlamePassable = s.FlamePassable;
+            d.Pushable = s.Pushable;
+            d.MapElementOccupied = s.MapElementOccupied;
+            d.Durability = s.Durability;
+            d.MapElementId = s.MapElementId;
+            d.VisualSceneElementId = s.VisualSceneElementId;
+            s.Collision = CellCollision.Open;
+            s.FlamePassable = true;
+            s.Pushable = false;
+            s.MapElementOccupied = false;
+            s.Durability = 0;
+            s.MapElementId = 0;
+            s.VisualSceneElementId = 0;
+            Map.Cells[si] = s;
+            Map.Cells[di] = d;
+        }
 
         public static RoleCombatProfile GetRoleProfile(byte roleId) =>
             CombatProfiles.TryGetValue(roleId, out var p) ? p : new RoleCombatProfile(2, 6, 2, 8, 4, 7);
@@ -462,6 +631,9 @@ namespace Qqtang.Core.Battle
                 return;
             }
 
+            if (actor.IsLocal && (TryKickAdjacentBomb(dir) || TryPushAdjacentMapElement(dir)))
+                return;
+
             // Corner slide assistance (6px tolerance like native FUN_005cfc10)
             if (dx != 0)
             {
@@ -673,7 +845,7 @@ namespace Qqtang.Core.Battle
             if (local == null) return;
 
             // 1. Local flame hit check -> Trapped (0x0FA5)
-            if (local.State == ActorLifeState.Active && HasFlameAt(local.CurrentCell))
+            if (local.State == ActorLifeState.Active && !local.IsInvulnerable(ElapsedMs) && HasFlameAt(local.CurrentCell))
             {
                 local.State = ActorLifeState.Trapped;
                 local.TrappedElapsedMs = 0;
@@ -893,6 +1065,102 @@ namespace Qqtang.Core.Battle
                 case GameEventSchemas.NotifyGameOver:
                     IsFinished = true;
                     break;
+
+                case ExtendedGameEventSchemas.RequestUseItem:
+                case ExtendedGameEventSchemas.NotifyPlayerUseItem:
+                {
+                    var use = WorldUseItemEventData.Parse(body);
+                    var uActor = GetActor(use.PlayerId);
+                    if (uActor != null)
+                    {
+                        if (use.ItemId == 63 && uActor.State == ActorLifeState.Trapped)
+                        {
+                            uActor.State = ActorLifeState.Active;
+                            uActor.TrappedElapsedMs = 0;
+                            uActor.ShieldActiveUntilMs = ElapsedMs + 800;
+                        }
+                        else if (use.ItemId == 64)
+                        {
+                            foreach (var b in Bombs)
+                                if (b.OwnerId == uActor.PlayerId && b.ExplodeAtMs > ElapsedMs)
+                                    b.ExplodeAtMs = ElapsedMs;
+                        }
+                        else if (use.ItemId == 41 || use.ItemId == 42 || use.ItemId == 43)
+                        {
+                            uActor.ShieldActiveUntilMs = ElapsedMs + 3000;
+                        }
+                    }
+                    break;
+                }
+
+                case ExtendedGameEventSchemas.RequestMoveBomb:
+                case ExtendedGameEventSchemas.NotifyPlayerMoveBomb:
+                {
+                    var mb = MoveBombEventData.Parse(body);
+                    var bomb = Bombs.Find(b => b.Cell.Row == mb.FromRow && b.Cell.Col == mb.FromCol);
+                    if (bomb != null && Map.InBounds(mb.ToRow, mb.ToCol))
+                        bomb.Cell = new GridCell(mb.ToRow, mb.ToCol);
+                    break;
+                }
+
+                case ExtendedGameEventSchemas.RequestMoveMapElement:
+                {
+                    var me = MoveMapElementEventData.ParseRequest(body);
+                    var (dr, dc) = DirectionDelta(FromNativeDirectionCode(me.Direction));
+                    ApplyMapElementSlide(new GridCell(me.Row, me.Col), new GridCell(me.Row + dr, me.Col + dc));
+                    break;
+                }
+
+                case ExtendedGameEventSchemas.NotifyMapElementMoved:
+                {
+                    var me = MoveMapElementEventData.ParseMoved(body);
+                    var (dr, dc) = DirectionDelta(FromNativeDirectionCode(me.Direction));
+                    ApplyMapElementSlide(new GridCell(me.Row, me.Col), new GridCell(me.Row + dr, me.Col + dc));
+                    break;
+                }
+
+                case ExtendedGameEventSchemas.NotifyPlayerRelive:
+                {
+                    var rel = PlayerReliveEventData.Parse(body);
+                    var rActor = GetActor(rel.PlayerId);
+                    if (rActor != null)
+                    {
+                        rActor.State = ActorLifeState.Active;
+                        rActor.TrappedElapsedMs = 0;
+                        rActor.PosX = rel.Col * CellSizePixels + CellSizePixels / 2;
+                        rActor.PosY = rel.Row * CellSizePixels + CellSizePixels / 2;
+                        rActor.TargetPosX = rActor.PosX;
+                        rActor.TargetPosY = rActor.PosY;
+                        rActor.ShieldActiveUntilMs = ElapsedMs + 2000;
+                    }
+                    break;
+                }
+
+                case GameEventSchemas.NotifyDispatchItem:
+                {
+                    var disp = DispatchItemEventData.Parse(body);
+                    foreach (var it in disp.Items)
+                    {
+                        if (Map.InBounds(it.Row, it.Col))
+                            Pickups.Add(new FieldPickup { SceneId = it.ItemId != 0 ? it.ItemId : it.ItemType, Cell = new GridCell(it.Row, it.Col), Hidden = false });
+                    }
+                    break;
+                }
+
+                case ExtendedGameEventSchemas.NotifyUseEmotion:
+                {
+                    var emo = UseEmotionEventData.Parse(body);
+                    if (_uinToPlayerId.TryGetValue(emo.Uin, out ushort pid))
+                    {
+                        var eActor = GetActor(pid);
+                        if (eActor != null)
+                        {
+                            eActor.ActiveEmotionId = emo.EmotionId;
+                            eActor.EmotionExpireAtMs = ElapsedMs + 3000;
+                        }
+                    }
+                    break;
+                }
             }
         }
 
@@ -906,7 +1174,48 @@ namespace Qqtang.Core.Battle
                 case 6: actor.BombCapacity = actor.MaxBombCapacity; break;
                 case 7: actor.BombPower = actor.MaxBombPower; break;
                 case 8: actor.SpeedRate = actor.MaxSpeedRate; break;
+                case 26:
+                case 45: actor.CanKickBomb = true; break;
+                case 41:
+                case 42:
+                case 43: actor.ShieldCount++; break;
                 case 47: actor.SpeedRate = (byte)Math.Max((int)actor.SpeedRate, 8); break;
+                case 63: actor.NeedleCount++; break;
+                case 64: actor.RemoteDetonatorCount++; break;
+            }
+        }
+
+        private static (int dr, int dc) DirectionDelta(BattleDirection dir)
+        {
+            switch (dir)
+            {
+                case BattleDirection.Up: return (-1, 0);
+                case BattleDirection.Down: return (1, 0);
+                case BattleDirection.Left: return (0, -1);
+                case BattleDirection.Right: return (0, 1);
+                default: return (0, 0);
+            }
+        }
+
+        private static byte ToNativeDirectionCode(BattleDirection dir)
+        {
+            switch (dir)
+            {
+                case BattleDirection.Right: return 0;
+                case BattleDirection.Up: return 1;
+                case BattleDirection.Left: return 2;
+                default: return 3;
+            }
+        }
+
+        private static BattleDirection FromNativeDirectionCode(byte code)
+        {
+            switch (code & 0x03)
+            {
+                case 0: return BattleDirection.Right;
+                case 1: return BattleDirection.Up;
+                case 2: return BattleDirection.Left;
+                default: return BattleDirection.Down;
             }
         }
 
