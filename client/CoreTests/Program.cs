@@ -1,0 +1,451 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using Qqtang.Core.Battle;
+using Qqtang.Core.Network;
+using Qqtang.Core.Protocol;
+
+namespace Qqtang.Core.Tests
+{
+    internal static class Program
+    {
+        private static int _passed;
+
+        private static async Task<int> Main(string[] args)
+        {
+            try
+            {
+                TestQqTeaRoundTrip();
+                TestUdpChecksumAndRoundTrip();
+                TestGameplayBatchRoundTrip();
+                TestRule1SimulationMechanics();
+                TestRealMapFileIfPresent();
+
+                if (!args.Contains("--unit-only"))
+                {
+                    await TestLiveGoServerEndToEndAsync();
+                }
+
+                Console.WriteLine($"\nALL {_passed} CHECKS PASSED!");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"\nTEST FAILED: {ex}");
+                return 1;
+            }
+        }
+
+        private static void Assert(bool cond, string message)
+        {
+            if (!cond) throw new Exception($"Assertion failed: {message}");
+        }
+
+        private static void Pass(string name)
+        {
+            _passed++;
+            Console.WriteLine($"[PASS] {name}");
+        }
+
+        private static void TestQqTeaRoundTrip()
+        {
+            byte[] plain = Encoding.UTF8.GetBytes("QQTang-Unity-Protocol-Check-2026!");
+            byte[] enc = QqTea.Encrypt(plain, QqTea.LocalKey);
+            byte[] dec = QqTea.Decrypt(enc, QqTea.LocalKey);
+            Assert(plain.SequenceEqual(dec), "QQ-TEA round-trip mismatch");
+
+            byte[] frame = LocalPacketCodec.EncodeLocalPacket(1, 2, 1000001, GameCommands.Hello, 2, 1, new byte[] { 1, 2, 3, 4 });
+            DecodedLocalPacket decoded = LocalPacketCodec.DecodeLocalPacket(frame);
+            Assert(decoded.Command == GameCommands.Hello && decoded.EnvelopeUin == 1000001 && decoded.Payload.Length == 4,
+                "LocalPacketCodec round-trip mismatch");
+            Pass("QQ-TEA & LocalPacketCodec");
+        }
+
+        private static void TestUdpChecksumAndRoundTrip()
+        {
+            var ep = new LegacyUdpEndpoint { IPv4 = new byte[] { 127, 0, 0, 1 }, Port = 45678 };
+            byte[] dgram = QqtPppUdpCodec.EncodePresence(1, 7, 1000001, ep);
+            Assert(QqtPppUdpCodec.ComputeChecksum(dgram) == 0, "UDP presence checksum non-zero");
+            var pkt = QqtPppUdpCodec.DecodeControlPacket(dgram);
+            Assert(pkt.Type == LegacyUdpMessageType.Presence && pkt.PlayerId == 7 && pkt.Presence.Value.Port == 45678,
+                "UDP presence decode mismatch");
+            Pass("QQTPPP UDP Checksum & Presence");
+        }
+
+        private static void TestGameplayBatchRoundTrip()
+        {
+            var move = new PlayerMoveMessage
+            {
+                PlayerId = 1,
+                Entries = new List<PlayerMoveEntryData>
+                {
+                    new PlayerMoveEntryData
+                    {
+                        PlayerId = 1,
+                        Move = new PlayerMoveSequenceData
+                        {
+                            Sequence = 3, TimeStamp = 3100,
+                            CurrentPosX = 60, CurrentPosY = 60, EndPosX = 100, EndPosY = 60,
+                            WalkAndDirection = Rule1BattleSimulation.ToNativeWalkByte(BattleDirection.Right, true, false),
+                            Speed = 4
+                        }
+                    }
+                }
+            };
+            var pkg = new GameplayDataPackage
+            {
+                PlayerId = 1, Time = 3100, GameId = 42,
+                MessageIndexes = new List<uint> { 1 },
+                Messages = new List<BattleMessageData>
+                {
+                    new BattleMessageData { Time = 3100, DataId = GameEventSchemas.PlayerMove, Sequence = 1, Data = move.Marshal(), GameTime = 3100 }
+                }
+            };
+            var batch = new GameplayBatch
+            {
+                GameId = 42, FirstIndex = 0,
+                Entries = new List<GameplayBatchEntry> { new GameplayBatchEntry { Index = 1, Package = pkg } }
+            };
+            byte[] enc = batch.EncodeEncrypted();
+            var dec = GameplayBatch.DecodeEncrypted(enc);
+            Assert(dec.GameId == 42 && dec.Entries.Count == 1 && dec.Entries[0].Package.Messages.Count == 1,
+                "GameplayBatch decode mismatch");
+            var parsedMove = PlayerMoveMessage.Parse(dec.Entries[0].Package.Messages[0].Data);
+            Assert(parsedMove.Entries[0].Move.EndPosX == 100, "PlayerMove decode mismatch");
+            Pass("GameplayBatch (0x0FBD) & PlayerMove (0x0FA2)");
+        }
+
+        private static void TestRule1SimulationMechanics()
+        {
+            var map = MapDataLoader.BuildFallbackArena(201);
+            var begin = new GameBeginData
+            {
+                GameId = 1, MapId = 201, SpawnSeed = 12345, ItemSeed = 67890,
+                ArbitratorPlayerId = 1, GameTimeMs = 240_000,
+                Players = new List<PlayerGameInfoData>
+                {
+                    new PlayerGameInfoData { PlayerId = 1, RoleId = 1, TeamId = 1 },
+                    new PlayerGameInfoData { PlayerId = 2, RoleId = 2, TeamId = 2 }
+                },
+                NewItems = new List<GameItemTypeData> { new GameItemTypeData { ItemId = 1, Quantity = 5 } }
+            };
+            var sim = new Rule1BattleSimulation();
+            sim.Initialize(begin, map, 1, false);
+            Assert(sim.Actors.Count == 2 && sim.Pickups.Count == 5, "Simulation init mismatch");
+
+            // Advance past 3000ms Ready/Go
+            sim.Step(3000, BattleDirection.None, false);
+            int startX = sim.LocalActor.PosX;
+            BattleDirection moveDir = sim.LocalActor.CurrentCell.Col < map.Width / 2
+                ? BattleDirection.Right
+                : BattleDirection.Left;
+            sim.Step(100, moveDir, true);
+            Assert(sim.LocalActor.PosX != startX, $"Local actor at {sim.LocalActor.CurrentCell} should move {moveDir}");
+            Assert(sim.Bombs.Count == 1, "Local bomb should be placed");
+            Assert(sim.OutgoingPeerEvents.Any(e => e.schemaId == GameEventSchemas.PlayerUseBomb), "Should emit PlayerUseBomb");
+
+            // Advance 3050ms to detonate bomb
+            sim.Step(3050, BattleDirection.None, false);
+            Assert(sim.Bombs.Count == 0 && sim.Flames.Count > 0, "Bomb should detonate into flames");
+            Assert(sim.OutgoingTcpEvents.Any(e => e.schemaId == GameEventSchemas.NotifyBombExplode), "Should emit NotifyBombExplode");
+            Pass("Rule-1 BattleSimulation (move, bomb, fuse, blast)");
+        }
+
+        private static void TestRealMapFileIfPresent()
+        {
+            string clientRoot = @"C:\Users\luyua\Downloads\QQTang-Local\runtime\client-patched";
+            string mapElemPath = Path.Combine(clientRoot, "object", "mapElem", "mapElem.py");
+            string mapPath = Path.Combine(clientRoot, "map", "bomb01_8.map");
+            if (!File.Exists(mapElemPath) || !File.Exists(mapPath))
+            {
+                Console.WriteLine("[SKIP] Real .map parse (local QQTang-Local not present)");
+                return;
+            }
+            var elements = MapDataLoader.LoadMapElementsPy(mapElemPath);
+            Assert(elements.Count > 500, $"Expected >500 map elements, got {elements.Count}");
+            var parsed = MapDataLoader.ParseMapBytes(1, File.ReadAllBytes(mapPath), elements);
+            Assert(parsed.Width == 15 && parsed.Height == 13 && parsed.SpawnGroupA.Count > 0,
+                $"Unexpected real .map geometry {parsed.Width}x{parsed.Height}");
+            Pass($"Real .map parser ({elements.Count} elements, {parsed.Width}x{parsed.Height}, spawnsA={parsed.SpawnGroupA.Count})");
+        }
+
+        private static int FindFreeTcpPort()
+        {
+            var l = new TcpListener(IPAddress.Loopback, 0);
+            l.Start();
+            int port = ((IPEndPoint)l.LocalEndpoint).Port;
+            l.Stop();
+            return port;
+        }
+
+        private static async Task TestLiveGoServerEndToEndAsync()
+        {
+            string repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+            string serverDir = Path.Combine(repoRoot, "server");
+            string clientPatchedRoot = @"C:\Users\luyua\Downloads\QQTang-Local\runtime\client-patched";
+            if (!Directory.Exists(clientPatchedRoot))
+            {
+                Console.WriteLine("[SKIP] Live Go server E2E (QQTang-Local/runtime/client-patched not found)");
+                return;
+            }
+
+            string tempDir = Path.Combine(Path.GetTempPath(), "qqtang-unity-e2e-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(tempDir);
+            string serverExe = Path.Combine(tempDir, "qqt-server.exe");
+            Process serverProc = null;
+
+            try
+            {
+                // 1. Build qqt-server from our monorepo's server/
+                var build = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "go",
+                    Arguments = $"build -o \"{serverExe}\" ./cmd/qqt-server",
+                    WorkingDirectory = serverDir,
+                    RedirectStandardError = true,
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false
+                });
+                build.WaitForExit();
+                Assert(build.ExitCode == 0, "go build ./cmd/qqt-server failed: " + build.StandardError.ReadToEnd());
+
+                // 2. Write isolated test server config on ephemeral port
+                int gamePort = FindFreeTcpPort();
+                int gmPort = FindFreeTcpPort();
+                string dbPath = Path.Combine(tempDir, "test.sqlite");
+                string logPath = Path.Combine(tempDir, "server.jsonl");
+                string cfgPath = Path.Combine(tempDir, "config.json");
+
+                string cfgJson = $@"{{
+  ""capture_root"": ""{EscapeJson(Path.Combine(tempDir, "captures"))}"",
+  ""log_file"": ""{EscapeJson(logPath)}"",
+  ""client_root"": ""{EscapeJson(clientPatchedRoot)}"",
+  ""competitive_map_rules_path"": ""{EscapeJson(Path.Combine(serverDir, "data", "qqt_competitive_map_rules.json"))}"",
+  ""database_path"": ""{EscapeJson(dbPath)}"",
+  ""seed_uin"": 1000001,
+  ""initial_accounts"": [
+    {{ ""uin"": 1000001, ""nickname"": ""PlayerOne"", ""gender"": 1 }},
+    {{ ""uin"": 1000002, ""nickname"": ""PlayerTwo"", ""gender"": 0 }}
+  ],
+  ""adventure_rules_path"": ""{EscapeJson(Path.Combine(serverDir, "configs", "adventure-rules.json"))}"",
+  ""role_rules_path"": ""{EscapeJson(Path.Combine(serverDir, "configs", "role-rules.json"))}"",
+  ""equipment_seeds_path"": ""{EscapeJson(Path.Combine(serverDir, "configs", "starter-loadouts.json"))}"",
+  ""combine_recipes_path"": ""{EscapeJson(Path.Combine(serverDir, "data", "qqt_combine_recipes.json"))}"",
+  ""break_egg_rewards_path"": ""{EscapeJson(Path.Combine(serverDir, "configs", "break-egg-rewards.json"))}"",
+  ""forge_rules_path"": ""{EscapeJson(Path.Combine(serverDir, "data", "qqt_forge_rules.json"))}"",
+  ""item_image_aliases_path"": ""{EscapeJson(Path.Combine(serverDir, "configs", "item-image-aliases.json"))}"",
+  ""gm_http_address"": ""127.0.0.1:{gmPort}"",
+  ""directory_hall"": {{
+    ""server_ip"": ""127.0.0.1"",
+    ""server_port"": {gamePort},
+    ""server_udp_port"": {gamePort}
+  }},
+  ""max_packet_bytes"": 1048576,
+  ""idle_timeout_ms"": 60000,
+  ""player_profile"": {{
+    ""nickname"": ""PlayerOne"", ""gender"": 1, ""icon_id"": 0, ""player_id"": 1, ""identity"": 8192,
+    ""section_id"": 1, ""room_count"": 100, ""minimum_room_id"": 1, ""tutorial_completed"": true,
+    ""game_info"": {{ ""wins"": 10, ""losses"": 2, ""draws"": 1, ""points"": 5000, ""money"": 99999, ""degree"": 5, ""role_id"": 1 }},
+    ""inventory"": [ {{ ""id"": 99, ""quantity"": 1 }}, {{ ""id"": 30098, ""quantity"": 1 }} ]
+  }},
+  ""listeners"": [
+    {{
+      ""name"": ""game-tcp"",
+      ""network"": ""tcp"",
+      ""address"": ""127.0.0.1:{gamePort}"",
+      ""response"": {{
+        ""qqt_directory_response"": true,
+        ""qqt_login_success"": true,
+        ""qqt_room_list"": true,
+        ""qqt_player_list"": true,
+        ""qqt_create_room_success"": true,
+        ""qqt_start_game_success"": true,
+        ""qqt_game_begin"": true,
+        ""qqt_game_event_relay"": true
+      }}
+    }},
+    {{
+      ""name"": ""game-udp"",
+      ""network"": ""udp"",
+      ""address"": ""127.0.0.1:{gamePort}"",
+      ""response"": {{}}
+    }}
+  ]
+}}";
+                File.WriteAllText(cfgPath, cfgJson, new UTF8Encoding(false));
+
+                serverProc = Process.Start(new ProcessStartInfo
+                {
+                    FileName = serverExe,
+                    Arguments = $"-config \"{cfgPath}\"",
+                    WorkingDirectory = tempDir,
+                    RedirectStandardError = true,
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false
+                });
+                var serverErr = new StringBuilder();
+                serverProc.OutputDataReceived += (_, e) => { };
+                serverProc.ErrorDataReceived += (_, e) => { if (e.Data != null) serverErr.AppendLine(e.Data); };
+                serverProc.BeginOutputReadLine();
+                serverProc.BeginErrorReadLine();
+
+                // Wait for TCP listener to accept connections
+                bool ready = false;
+                for (int i = 0; i < 40; i++)
+                {
+                    if (serverProc.HasExited)
+                        throw new Exception("qqt-server exited early: " + serverErr);
+                    try
+                    {
+                        using (var probe = new TcpClient())
+                        {
+                            await probe.ConnectAsync("127.0.0.1", gamePort);
+                            ready = true;
+                            break;
+                        }
+                    }
+                    catch { await Task.Delay(150); }
+                }
+                Assert(ready, "Timed out waiting for qqt-server to listen");
+
+                using var c1 = new QqtangSessionClient();
+                using var c2 = new QqtangSessionClient();
+
+                // 3. Authenticate & Login both clients via QQTAUTH1 + 0x0064 + UDP Type-1
+                var login1 = await c1.ConnectAndLoginAsync("127.0.0.1", gamePort, 1000001, "123456", roleId: 1);
+                var login2 = await c2.ConnectAndLoginAsync("127.0.0.1", gamePort, 1000002, "123456", roleId: 2);
+                Assert(login1.PlayerId > 0 && login2.PlayerId > 0 && login1.PlayerId != login2.PlayerId,
+                    $"Invalid player IDs {login1.PlayerId}/{login2.PlayerId}");
+
+                // Wait briefly for UDP Type-1 presence reply
+                for (int i = 0; i < 20 && (!c1.UdpPresenceConfirmed || !c2.UdpPresenceConfirmed); i++)
+                    await Task.Delay(50);
+                Assert(c1.UdpPresenceConfirmed && c2.UdpPresenceConfirmed, "UDP Type-1 presence not confirmed");
+                Pass($"Live Go Server Login + QQTAUTH1 + UDP Presence (P1={login1.PlayerId}, P2={login2.PlayerId})");
+
+                // 4. Create room, select map 201 (中国城01), join, change team, ready, start
+                ushort roomId = await c1.CreateRoomAsync("UnityTestRoom", RoomPropertyFlag.Standard, RoomGameType.CompetitiveNoItem);
+                Assert(roomId > 0, "CreateRoom returned roomId=0");
+                await c1.SelectMapAsync(roomId, 201, RoomGameType.CompetitiveNoItem);
+
+                var rooms = await c2.RefreshRoomListAsync();
+                Assert(rooms.Rooms.Any(r => r.RoomId == roomId), "Room not visible in RoomList");
+
+                var enter2 = await c2.EnterRoomAsync(roomId, roleId: 2);
+                Assert(enter2.ResultId == 0 && enter2.RoomId == roomId && enter2.Players.Count == 2,
+                    $"EnterRoom failed: res={enter2.ResultId} count={enter2.Players.Count}");
+
+                await c2.ChangeTeamAsync(roomId, 2);
+                await c2.SetReadyAsync(roomId, true);
+                ushort startRes = await c1.StartGameAsync(roomId);
+                Assert(startRes == 0, $"StartGame rejected with 0x{startRes:X4}");
+
+                // 5. Receive GameBeginNotify (0x0089) on both clients
+                GameBeginData begin1 = await WaitForCommandAsync(c1, GameCommands.GameBeginNotify, p => GameBeginData.ParseLengthPrefixed(p.Payload));
+                GameBeginData begin2 = await WaitForCommandAsync(c2, GameCommands.GameBeginNotify, p => GameBeginData.ParseLengthPrefixed(p.Payload));
+                Assert(begin1.GameId == begin2.GameId && begin1.MapId == 201 && begin1.Players.Count == 2,
+                    "GameBegin mismatch between clients");
+                Pass($"Live Lobby -> Room({roomId}) -> StartGame -> GameBegin(GameID={begin1.GameId}, Map={begin1.MapId})");
+
+                // 6. Exchange realtime QQTPPP Type-2 UDP movement + bomb placement
+                var mapElems = MapDataLoader.LoadMapElementsPy(Path.Combine(clientPatchedRoot, "object", "mapElem", "mapElem.py"));
+                string townMapFile = Path.Combine(clientPatchedRoot, "map", "town01.map");
+                var mapData = File.Exists(townMapFile)
+                    ? MapDataLoader.ParseMapBytes(201, File.ReadAllBytes(townMapFile), mapElems)
+                    : MapDataLoader.BuildFallbackArena(201);
+
+                var sim1 = new Rule1BattleSimulation();
+                var sim2 = new Rule1BattleSimulation();
+                sim1.Initialize(begin1, mapData, c1.PlayerId, false);
+                sim2.Initialize(begin2, mapData, c2.PlayerId, false);
+                sim1.Step(3000, BattleDirection.None, false);
+                sim2.Step(3000, BattleDirection.None, false);
+
+                sim1.Step(100, BattleDirection.Right, true);
+                var peersForC1 = new List<LegacyUdpMulticastTarget>
+                {
+                    new LegacyUdpMulticastTarget { PlayerId = c2.PlayerId, Uin = c2.Uin }
+                };
+                await c1.SendPeerGameplayAsync(begin1.GameId, sim1.ElapsedMs, peersForC1, sim1.OutgoingPeerEvents, mirrorReliableTcp: true);
+
+                // Verify C2 receives C1's movement & bomb over live QQTPPP UDP relay!
+                GameplayBatch receivedBatch = null;
+                for (int i = 0; i < 40; i++)
+                {
+                    if (c2.TryDequeueUdpBatch(out receivedBatch)) break;
+                    await Task.Delay(50);
+                }
+                Assert(receivedBatch != null && receivedBatch.GameId == begin1.GameId && receivedBatch.Entries.Count == 1,
+                    "C2 did not receive QQTPPP Type-2 UDP batch from C1");
+                foreach (var msg in receivedBatch.Entries[0].Package.Messages)
+                    sim2.ApplyRemoteMessage(receivedBatch.Entries[0].Package.PlayerId, msg.DataId, msg.Data);
+                Assert(sim2.Bombs.Count == 1, "C2 simulation did not materialize C1's relayed bomb");
+                Pass("Live QQTPPP Type-2 UDP Relay (PlayerMove + PlayerUseBomb synced C1 -> Go Server -> C2)");
+
+                // 7. Report C2 death over TCP GameEvent (0x0083) -> verify Go server settles match with NotifyGameOver (0x0FBB)
+                var death = new PlayerDeathMessage
+                {
+                    PlayerId = c2.PlayerId,
+                    ClientTime = sim2.ElapsedMs,
+                    PosX = (ushort)sim2.LocalActor.PosX,
+                    PosY = (ushort)sim2.LocalActor.PosY
+                };
+                await c2.SendGameEventTcpAsync(roomId, GameEventSchemas.NotifyPlayerDie, death.Marshal());
+
+                GameOverData over1 = await WaitForGameOverAsync(c1);
+                GameOverData over2 = await WaitForGameOverAsync(c2);
+                Assert(over1 != null && over2 != null && over1.Results.Count == 2, "Missing GameOver settlement");
+                var p1Res = over1.Results.First(r => r.PlayerId == c1.PlayerId);
+                var p2Res = over1.Results.First(r => r.PlayerId == c2.PlayerId);
+                Assert(p1Res.Result == GameResultCode.Win && p2Res.Result == GameResultCode.Loss,
+                    $"Unexpected settlement: P1={p1Res.Result} P2={p2Res.Result}");
+                Pass($"Live Match Settlement (P1={p1Res.Result}, P2={p2Res.Result})");
+            }
+            finally
+            {
+                try { if (serverProc != null && !serverProc.HasExited) serverProc.Kill(true); } catch { }
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        private static async Task<T> WaitForCommandAsync<T>(QqtangSessionClient client, ushort command, Func<DecodedLocalPacket, T> parser)
+        {
+            for (int i = 0; i < 60; i++)
+            {
+                while (client.TryDequeueTcpPacket(out var pkt))
+                {
+                    if (pkt.Command == command) return parser(pkt);
+                }
+                await Task.Delay(50);
+            }
+            throw new TimeoutException($"Timed out waiting for command 0x{command:X4}.");
+        }
+
+        private static async Task<GameOverData> WaitForGameOverAsync(QqtangSessionClient client)
+        {
+            for (int i = 0; i < 60; i++)
+            {
+                while (client.TryDequeueTcpPacket(out var pkt))
+                {
+                    if (pkt.Command == GameCommands.GameEventNotify)
+                    {
+                        var ev = NotifyGameEventMessage.Parse(pkt.Payload);
+                        if (ev.Schema == GameEventSchemas.NotifyGameOver)
+                            return GameOverData.Parse(ev.Body);
+                    }
+                }
+                await Task.Delay(50);
+            }
+            throw new TimeoutException("Timed out waiting for NOTIFY_GAME_OVER (0x0FBB).");
+        }
+
+        private static string EscapeJson(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+    }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "Qqtang.Unity",
+  "rootNamespace": "Qqtang.UnityClient",
+  "references": [
+    "Qqtang.Core"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

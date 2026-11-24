@@ -1,0 +1,4 @@
+﻿<Solution>
+  <Project Path="Qqtang.Unity.csproj" />
+  <Project Path="Qqtang.Core.csproj" />
+</Solution>
