@@ -215,7 +215,14 @@ namespace Qqtang.UnityClient.UI
                 byte nextStatus = (byte)(active ? 0 : 1);
                 UiFactory.CreateButton(row, active ? "卸下" : "装备/启用",
                     () => _ctx.App.RequestSetItemStatus(capturedId, nextStatus),
-                    active ? UiFactory.AccentMuted : UiFactory.AccentCeladon, fontSize: 12, width: 88f, height: 28f);
+                    active ? UiFactory.AccentMuted : UiFactory.AccentCeladon, fontSize: 12, width: 82f, height: 28f);
+                bool collected = it.Status == 2;
+                byte nextCabinet = (byte)(collected ? 0 : 2);
+                UiFactory.CreateButton(row, collected ? "取出" : "收藏柜",
+                    () => _ctx.App.RequestSetItemStatus(capturedId, nextCabinet),
+                    collected ? UiFactory.AccentGold : UiFactory.AccentMuted,
+                    collected ? UiFactory.TextInk : UiFactory.TextLight,
+                    fontSize: 11, width: 58f, height: 28f);
             }
         }
 

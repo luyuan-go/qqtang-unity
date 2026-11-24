@@ -24,7 +24,7 @@ if (-not $SkipArtPrepare) {
     $Manifest = Join-Path $ClientDir "Assets\StreamingAssets\ArtCache\manifest.json"
     if (-not (Test-Path $Manifest)) {
         Write-Host "[build] Populating local StreamingAssets ArtCache/Audio/Catalogs..."
-        python (Join-Path $PSScriptRoot "prepare-art-cache.py") --families town,common,box,bomb --max-fallback 32 --max-icons 60
+        python (Join-Path $PSScriptRoot "prepare-art-cache.py")
     }
 }
 

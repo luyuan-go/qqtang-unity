@@ -250,9 +250,9 @@ def main() -> int:
         default=Path(r"C:\Users\luyua\Downloads\QQTang-Local\runtime\client-patched"),
         help="Local QQTang-Local/runtime/client-patched directory",
     )
-    parser.add_argument("--families", type=str, default="town,common,box,bomb", help="Map families or 'all'")
-    parser.add_argument("--max-fallback", type=int, default=64, help="Max original .img fallbacks to decode per run (0=all)")
-    parser.add_argument("--max-icons", type=int, default=120, help="Max Daoist item icons to download from assets/items/art.json (0=all)")
+    parser.add_argument("--families", type=str, default="all", help="Map families or 'all'")
+    parser.add_argument("--max-fallback", type=int, default=0, help="Max original .img fallbacks to decode per run (0=all)")
+    parser.add_argument("--max-icons", type=int, default=0, help="Max Daoist item icons to download from assets/items/art.json (0=all)")
     parser.add_argument("--no-audio", action="store_true", help="Skip downloading Daoist WAV audio clips")
     parser.add_argument("--no-icons", action="store_true", help="Skip downloading Daoist item icons")
     parser.add_argument("--skip-remote", action="store_true", help="Skip fetching remote daoist-remake assets")
@@ -376,55 +376,97 @@ def main() -> int:
                             a_cached += 1
             print(f"[audio] ready={a_new + a_cached}/{len(DAOIST_AUDIO_CLIPS)} (downloaded={a_new}, cached={a_cached})", flush=True)
 
-    # 3. Original DIMG fallback from local effect/*.img and data/object.pkg
+    # 3. Original DIMG fallback from local effect/*.img, loose object/*/*.img, and data/object.pkg
+    #    ONLY decoded when no Daoist replacement exists for that key (exact Daoist-first, Original-fallback rule).
     if args.original_client.is_dir():
-        decoded_count = 0
+        fallback_jobs: List[Tuple[str, Optional[Path], Optional[Tuple[int, int]]]] = []
+        seen_fb = set()
+
+        def enqueue_fb(key: str, file_path: Optional[Path] = None, pkg_slice: Optional[Tuple[int, int]] = None) -> None:
+            if key in manifest["entries"] or key in seen_fb:
+                return
+            if args.max_fallback > 0 and len(fallback_jobs) >= args.max_fallback:
+                return
+            seen_fb.add(key)
+            fallback_jobs.append((key, file_path, pkg_slice))
+
         direct_fallbacks = [
             ("effects/bubble", args.original_client / "effect" / "0.img"),
             ("effects/flame", args.original_client / "effect" / "1.img"),
         ]
         for key, img_path in direct_fallbacks:
-            if key in manifest["entries"] or not img_path.is_file():
-                continue
-            dst = orig_dir / f"{key}.png"
-            if not dst.is_file():
-                png = decode_dimg_first_frame_to_png(img_path.read_bytes())
-                if not png:
-                    continue
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                dst.write_bytes(png)
-                decoded_count += 1
-            record(key, "original", f"original/{key}.png")
+            if img_path.is_file():
+                enqueue_fb(key, file_path=img_path)
 
         idx_path = args.original_client / "data" / "object.idx"
         pkg_path = args.original_client / "data" / "object.pkg"
+        pkg_bytes: Optional[bytes] = None
         if idx_path.is_file() and pkg_path.is_file():
             pkg_bytes = pkg_path.read_bytes()
             entries = parse_object_idx(idx_path.read_bytes(), len(pkg_bytes))
-            elem_pat = re.compile(r"(?:^|\\)mapelem\\.*?([0-9]+)\.img$", re.IGNORECASE)
+            pkg_patterns = [
+                (re.compile(r"(?:^|\\)mapelem\\.*?elem([0-9]+)_stand\.img$", re.IGNORECASE), "maps/elem_{}"),
+                (re.compile(r"(?:^|\\)mapelem\\.*?([0-9]+)\.img$", re.IGNORECASE), "maps/elem_{}"),
+                (re.compile(r"(?:^|\\)item\\item([0-9]+)_stand\.img$", re.IGNORECASE), "pickups/scene_{}"),
+                (re.compile(r"(?:^|\\)bomb\\bomb([0-9]+)_stand\.img$", re.IGNORECASE), "effects/bubble_{}"),
+                (re.compile(r"(?:^|\\)flame\\flame([0-9]+)_stand\.img$", re.IGNORECASE), "effects/flame_{}"),
+                (re.compile(r"(?:^|\\)pet\\pet([0-9]+)_stand\.img$", re.IGNORECASE), "pets/pet_{}"),
+                (re.compile(r"(?:^|\\)chatbg\\chat([0-9]+)_stand\.img$", re.IGNORECASE), "chatbg/chat_{}"),
+            ]
             for name, offset, raw_size, comp_size in entries:
-                if args.max_fallback > 0 and decoded_count >= args.max_fallback:
-                    break
-                m = elem_pat.search(name)
-                if not m:
-                    continue
-                key = f"maps/elem_{int(m.group(1))}"
-                if key in manifest["entries"]:
-                    continue
-                dst = orig_dir / f"{key}.png"
-                if not dst.is_file():
-                    try:
-                        raw_img = zlib.decompress(pkg_bytes[offset : offset + comp_size])
-                        png = decode_dimg_first_frame_to_png(raw_img)
-                        if not png:
-                            continue
-                        dst.parent.mkdir(parents=True, exist_ok=True)
-                        dst.write_bytes(png)
-                        decoded_count += 1
-                    except Exception:
-                        continue
-                record(key, "original", f"original/{key}.png")
-        print(f"[fallback] decoded {decoded_count} original DIMG .img files -> {orig_dir}", flush=True)
+                for pat, fmt in pkg_patterns:
+                    m = pat.search(name)
+                    if m:
+                        enqueue_fb(fmt.format(int(m.group(1))), pkg_slice=(offset, comp_size))
+                        break
+
+        # Also scan loose object/pet/*.img and object/bomb/*.img for extra skins/pets not inside object.pkg
+        loose_dirs = [
+            (args.original_client / "object" / "pet", re.compile(r"^pet([0-9]+)_stand\.img$", re.IGNORECASE), "pets/pet_{}"),
+            (args.original_client / "object" / "bomb", re.compile(r"^bomb([0-9]+)_stand\.img$", re.IGNORECASE), "effects/bubble_{}"),
+        ]
+        for ldir, pat, fmt in loose_dirs:
+            if not ldir.is_dir():
+                continue
+            for f in sorted(ldir.iterdir()):
+                m = pat.match(f.name)
+                if m:
+                    enqueue_fb(fmt.format(int(m.group(1))), file_path=f)
+
+        def decode_one(job: Tuple[str, Optional[Path], Optional[Tuple[int, int]]]) -> Tuple[str, bool, bool]:
+            key, fpath, pslice = job
+            dst = orig_dir / f"{key}.png"
+            if dst.is_file():
+                return key, True, False
+            try:
+                if fpath is not None:
+                    raw_img = fpath.read_bytes()
+                elif pslice is not None and pkg_bytes is not None:
+                    raw_img = zlib.decompress(pkg_bytes[pslice[0] : pslice[0] + pslice[1]])
+                else:
+                    return key, False, False
+                png = decode_dimg_first_frame_to_png(raw_img)
+                if not png:
+                    return key, False, False
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(png)
+                return key, True, True
+            except Exception:
+                return key, False, False
+
+        fb_new = 0
+        fb_cached = 0
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futs = [pool.submit(decode_one, j) for j in fallback_jobs]
+            for fut in as_completed(futs):
+                key, ok, decoded = fut.result()
+                if ok:
+                    record(key, "original", f"original/{key}.png")
+                    if decoded:
+                        fb_new += 1
+                    else:
+                        fb_cached += 1
+        print(f"[fallback] ready={fb_new + fb_cached} original DIMG PNGs (decoded={fb_new}, cached={fb_cached}) -> {orig_dir}", flush=True)
 
     manifest_path = art_out / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")

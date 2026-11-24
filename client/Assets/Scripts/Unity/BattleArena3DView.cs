@@ -33,10 +33,13 @@ namespace Qqtang.UnityClient
         private readonly List<GameObject> _pooledFieldObjects = new List<GameObject>();
         private readonly List<GameObject> _pooledProjectiles = new List<GameObject>();
         private GameObject _offlineBunOrb;
-        private GameObject _localPetOrb;
+        private GameObject _localPetVisual;
+        private uint _localPetVisualTypeId;
         private GameObject _basePillar1;
         private GameObject _basePillar2;
         public bool HasActivePet { get; set; }
+        public uint ActivePetTypeId { get; set; }
+        public uint LocalBubbleStyleId { get; set; }
 
         private Vector3 _baseCameraPos;
         private Vector3 _cameraLookTarget;
@@ -181,6 +184,20 @@ namespace Qqtang.UnityClient
                         }
 
                         _blockObjects[idx] = block;
+                    }
+
+                    // Canopy / Overlay visual layer (bushes, arches, roofs players walk underneath)
+                    if (cell.VisualOverlayElementId > 0 && _art.HasCachedAsset($"maps/elem_{cell.VisualOverlayElementId}"))
+                    {
+                        var canopy = new GameObject($"Overlay_{r}_{c}");
+                        canopy.transform.SetParent(_arenaRoot, false);
+                        canopy.transform.position = CellToWorld(r, c, 0.88f);
+                        canopy.transform.localScale = new Vector3(1.1f, 1.1f, 1.1f);
+                        var osr = canopy.AddComponent<SpriteRenderer>();
+                        osr.sprite = _art.GetSprite($"maps/elem_{cell.VisualOverlayElementId}", new Color(0.28f, 0.62f, 0.34f, 0.85f));
+                        osr.color = new Color(1f, 1f, 1f, 0.86f);
+                        osr.sortingOrder = 15;
+                        canopy.AddComponent<BillboardSprite>();
                     }
                 }
             }
@@ -426,31 +443,36 @@ namespace Qqtang.UnityClient
                 }
             }
 
-            // 2b. Active Pet Companion orbiting behind local player
+            // 2b. Active Pet Companion billboard sprite orbiting behind local player (Daoist/Original fallback)
             if (HasActivePet && sim.LocalActor != null && sim.LocalActor.State != ActorLifeState.Dead)
             {
-                if (_localPetOrb == null)
+                if (_localPetVisual == null)
                 {
-                    _localPetOrb = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-                    _localPetOrb.name = "ActivePetCompanion";
-                    _localPetOrb.transform.SetParent(_dynamicRoot, false);
-                    _localPetOrb.transform.localScale = Vector3.one * 0.34f;
-                    Destroy(_localPetOrb.GetComponent<Collider>());
-                    var pMat = new Material(Shader.Find("Sprites/Default"));
-                    pMat.color = new Color(0.45f, 0.95f, 0.82f, 0.92f);
-                    _localPetOrb.GetComponent<MeshRenderer>().sharedMaterial = pMat;
+                    _localPetVisual = new GameObject("ActivePetCompanion");
+                    _localPetVisual.transform.SetParent(_dynamicRoot, false);
+                    _localPetVisual.transform.localScale = Vector3.one * 0.68f;
+                    var psr = _localPetVisual.AddComponent<SpriteRenderer>();
+                    psr.sprite = _art.GetPetSprite(ActivePetTypeId);
+                    psr.sortingOrder = 11;
+                    _localPetVisual.AddComponent<BillboardSprite>();
+                    _localPetVisualTypeId = ActivePetTypeId;
                 }
-                _localPetOrb.SetActive(true);
+                else if (_localPetVisualTypeId != ActivePetTypeId)
+                {
+                    _localPetVisualTypeId = ActivePetTypeId;
+                    _localPetVisual.GetComponent<SpriteRenderer>().sprite = _art.GetPetSprite(ActivePetTypeId);
+                }
+                _localPetVisual.SetActive(true);
                 float ang = Time.time * 2.4f;
-                Vector3 hostPos = PixelToWorld(sim.LocalActor.PosX, sim.LocalActor.PosY, 0.58f + 0.08f * Mathf.Sin(Time.time * 5f));
-                _localPetOrb.transform.position = hostPos + new Vector3(Mathf.Cos(ang) * 0.52f, 0f, Mathf.Sin(ang) * 0.52f);
+                Vector3 hostPos = PixelToWorld(sim.LocalActor.PosX, sim.LocalActor.PosY, 0.42f + 0.08f * Mathf.Sin(Time.time * 5f));
+                _localPetVisual.transform.position = hostPos + new Vector3(Mathf.Cos(ang) * 0.56f, 0f, Mathf.Sin(ang) * 0.56f);
             }
-            else if (_localPetOrb != null)
+            else if (_localPetVisual != null)
             {
-                _localPetOrb.SetActive(false);
+                _localPetVisual.SetActive(false);
             }
 
-            // 3. Sync bombs
+            // 3. Sync bombs (applies equipped bubble skin sprite for local bombs & passive effect tint)
             EnsurePool(_pooledBombs, sim.Bombs.Count, "Bomb", () => CreateBillboardEntity("Bomb", "effects/bubble", new Color(0.18f, 0.68f, 1f), 0.95f, 5));
             for (int i = 0; i < _pooledBombs.Count; i++)
             {
@@ -462,6 +484,14 @@ namespace Qqtang.UnityClient
                     float pulse = 1.0f + 0.12f * Mathf.Sin(Time.time * 9f);
                     _pooledBombs[i].transform.position = CellToWorld(b.Cell.Row, b.Cell.Col, 0.12f);
                     _pooledBombs[i].transform.localScale = new Vector3(0.9f * pulse, 0.9f / pulse, 0.9f);
+                    var bsr = _pooledBombs[i].GetComponent<SpriteRenderer>();
+                    if (bsr != null)
+                    {
+                        bsr.sprite = b.OwnerId == sim.LocalPlayerId ? _art.GetBubbleSprite(LocalBubbleStyleId) : _art.GetBubbleSprite(0);
+                        var owner = sim.GetActor(b.OwnerId);
+                        bool hasPassive = owner != null && owner.PassiveEffects != Qqtang.Core.Protocol.PassiveFunctionEffectMask.None;
+                        bsr.color = hasPassive ? new Color(1f, 0.92f, 0.55f, 1f) : Color.white;
+                    }
                 }
             }
 
@@ -645,7 +675,8 @@ namespace Qqtang.UnityClient
             _pooledFieldObjects.Clear();
             _pooledProjectiles.Clear();
             _offlineBunOrb = null;
-            _localPetOrb = null;
+            _localPetVisual = null;
+            _localPetVisualTypeId = 0;
             _basePillar1 = null;
             _basePillar2 = null;
             _blockObjects = null;

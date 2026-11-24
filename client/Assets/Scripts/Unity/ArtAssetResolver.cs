@@ -59,6 +59,43 @@ namespace Qqtang.UnityClient
             return GetSprite($"items/item_{itemId}", fallback, circleMask: false);
         }
 
+        public Sprite GetBubbleSprite(uint bubbleStyleId)
+        {
+            if (bubbleStyleId > 0)
+            {
+                string styleKey = $"effects/bubble_{bubbleStyleId}";
+                if (HasCachedAsset(styleKey))
+                    return GetSprite(styleKey, new Color(0.18f, 0.68f, 1f), circleMask: true);
+            }
+            return GetSprite("effects/bubble", new Color(0.18f, 0.68f, 1f), circleMask: true);
+        }
+
+        public Sprite GetPetSprite(uint petTypeId)
+        {
+            if (petTypeId > 0)
+            {
+                string petKey = $"pets/pet_{petTypeId}";
+                if (HasCachedAsset(petKey))
+                    return GetSprite(petKey, new Color(0.45f, 0.95f, 0.82f), circleMask: true);
+            }
+            return GetSprite("pets/pet_100", new Color(0.45f, 0.95f, 0.82f), circleMask: true);
+        }
+
+        public Sprite GetChatBgSprite(uint bgId)
+        {
+            string key = $"chatbg/chat_{bgId}";
+            if (!HasCachedAsset(key)) return null;
+            return GetSprite(key, new Color(0.14f, 0.22f, 0.28f), circleMask: false);
+        }
+
+        public bool HasCachedAsset(string key)
+        {
+            if (_textures.ContainsKey(key)) return true;
+            string rel = key.Replace('/', Path.DirectorySeparatorChar) + ".png";
+            return File.Exists(Path.Combine(_cacheRoot, "daoist", rel)) ||
+                   File.Exists(Path.Combine(_cacheRoot, "original", rel));
+        }
+
         public Texture2D GetTexture(string key, Color fallbackColor, bool circleMask = false)
         {
             if (_textures.TryGetValue(key, out var cached)) return cached;

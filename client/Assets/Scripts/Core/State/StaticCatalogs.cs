@@ -10,6 +10,8 @@ namespace Qqtang.Core.State
     {
         public ushort MapId;
         public string Name = string.Empty;
+        public string Family = string.Empty;
+        public bool IsAdventure;
         public bool TransformationItemsEnabled;
     }
 
@@ -67,6 +69,7 @@ namespace Qqtang.Core.State
     public sealed class StaticCatalogs
     {
         public readonly List<MapCatalogEntry> Maps = new List<MapCatalogEntry>();
+        public readonly List<MapCatalogEntry> AdventureMaps = new List<MapCatalogEntry>();
         public readonly Dictionary<ushort, MapCatalogEntry> MapsById = new Dictionary<ushort, MapCatalogEntry>();
         public readonly Dictionary<ushort, ItemCatalogEntry> ItemsById = new Dictionary<ushort, ItemCatalogEntry>();
         public readonly List<ShopCommodityEntry> ShopCommodities = new List<ShopCommodityEntry>();
@@ -209,6 +212,8 @@ namespace Qqtang.Core.State
                 if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) continue;
                 TryLoadMaps(Path.Combine(root, "qqt_competitive_map_rules.json"));
                 TryLoadMaps(Path.Combine(root, "data", "qqt_competitive_map_rules.json"));
+                TryLoadMapDescPy(Path.Combine(root, "mapDesc.py"));
+                TryLoadMapDescPy(Path.Combine(root, "map", "mapDesc.py"));
                 TryLoadItems(Path.Combine(root, "item-id-catalog.json"));
                 TryLoadItems(Path.Combine(root, "docs", "item-id-catalog.json"));
                 TryLoadCombineRecipes(Path.Combine(root, "qqt_combine_recipes.json"));
@@ -222,12 +227,16 @@ namespace Qqtang.Core.State
 
         private void SeedBuiltInDefaults()
         {
-            AddMap(201, "包子01", true);
-            AddMap(202, "包子02", true);
-            AddMap(1, "水面01", true);
-            AddMap(101, "英雄01", true);
-            AddMap(301, "抢包山01", false);
-            AddMap(401, "比武01", true);
+            AddMap(201, "包子01", true, "town");
+            AddMap(202, "包子02", true, "town");
+            AddMap(1, "水面01", true, "water");
+            AddMap(101, "英雄01", true, "field");
+            AddMap(301, "抢包山01", false, "bun");
+            AddMap(401, "比武01", true, "match");
+            AddAdventureMap(1601, "魔法王国1 · 第一关");
+            AddAdventureMap(1607, "魔法王国2 · 第一关");
+            AddAdventureMap(1612, "机械王国 · 第一关");
+            AddAdventureMap(1616, "黑龙王国 · 第一关");
 
             // Core functional & egg/craft items (guaranteed valid in server Commodity.ini)
             var coreShop = new (uint cid, ushort iid, string name, ushort type, uint qty)[]
@@ -267,12 +276,70 @@ namespace Qqtang.Core.State
             }
         }
 
-        private void AddMap(ushort id, string name, bool transform)
+        private void AddMap(ushort id, string name, bool transform, string family = "")
         {
-            if (MapsById.ContainsKey(id)) return;
-            var entry = new MapCatalogEntry { MapId = id, Name = name, TransformationItemsEnabled = transform };
+            if (MapsById.TryGetValue(id, out var existing))
+            {
+                if (string.IsNullOrEmpty(existing.Family) && !string.IsNullOrEmpty(family)) existing.Family = family;
+                return;
+            }
+            var entry = new MapCatalogEntry { MapId = id, Name = name, Family = family, IsAdventure = false, TransformationItemsEnabled = transform };
             Maps.Add(entry);
             MapsById[id] = entry;
+        }
+
+        private void AddAdventureMap(ushort id, string name)
+        {
+            if (MapsById.ContainsKey(id)) return;
+            var entry = new MapCatalogEntry { MapId = id, Name = name, Family = "pve", IsAdventure = true, TransformationItemsEnabled = false };
+            AdventureMaps.Add(entry);
+            MapsById[id] = entry;
+        }
+
+        public List<MapCatalogEntry> GetMapsForRoomType(Qqtang.Core.Protocol.RoomGameType gameType) =>
+            gameType == Qqtang.Core.Protocol.RoomGameType.Adventure ? AdventureMaps : Maps;
+
+        private void TryLoadMapDescPy(string path)
+        {
+            if (!File.Exists(path) || AdventureMaps.Count > 10) return;
+            try
+            {
+                byte[] raw = File.ReadAllBytes(path);
+                string text = Qqtang.Core.Protocol.LegacyTextEncoding.DecodeNullTerminated(raw);
+                var rx = new System.Text.RegularExpressions.Regex(
+                    @"^\(\s*([0-9]+),\s*'([^']+)',\s*'([^']*)',\s*[0-9]+,\s*[0-9]+,\s*[0-9]+,\s*'([^']+\.map)'",
+                    System.Text.RegularExpressions.RegexOptions.Multiline);
+                var parsedPve = new List<(ushort id, string name)>();
+                foreach (System.Text.RegularExpressions.Match m in rx.Matches(text))
+                {
+                    if (!ushort.TryParse(m.Groups[1].Value, out ushort id) || id == 0) continue;
+                    string fam = m.Groups[2].Value.Trim().ToLowerInvariant();
+                    string name = m.Groups[3].Value.Trim();
+                    if (fam == "pve")
+                    {
+                        parsedPve.Add((id, string.IsNullOrEmpty(name) ? $"探险关卡 #{id}" : $"{name} (#{id})"));
+                    }
+                    else if (MapsById.TryGetValue(id, out var existing))
+                    {
+                        existing.Family = fam;
+                    }
+                    else
+                    {
+                        AddMap(id, string.IsNullOrEmpty(name) ? $"地图#{id}" : name, true, fam);
+                    }
+                }
+                if (parsedPve.Count > 0)
+                {
+                    AdventureMaps.Clear();
+                    foreach (var p in parsedPve)
+                    {
+                        var entry = new MapCatalogEntry { MapId = p.id, Name = p.name, Family = "pve", IsAdventure = true };
+                        AdventureMaps.Add(entry);
+                        MapsById[p.id] = entry;
+                    }
+                }
+            }
+            catch { }
         }
 
         private void TryLoadMaps(string path)
@@ -284,6 +351,7 @@ namespace Qqtang.Core.State
                 if (root == null || !root.TryGetValue("maps", out var mapsObj) || !(mapsObj is List<object> arr)) return;
                 Maps.Clear();
                 MapsById.Clear();
+                foreach (var adv in AdventureMaps) MapsById[adv.MapId] = adv;
                 foreach (var item in arr)
                 {
                     if (!(item is Dictionary<string, object> obj)) continue;

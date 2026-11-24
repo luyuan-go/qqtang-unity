@@ -32,8 +32,10 @@ namespace Qqtang.UnityClient.UI
 
         // Map picker modal
         private readonly RectTransform _mapModal;
+        private readonly Text _mapModalTitle;
         private readonly InputField _mapSearchInput;
         private readonly RectTransform _mapListContent;
+        private readonly Image _chatBgBanner;
 
         // Room settings modal
         private readonly RectTransform _settingsModal;
@@ -142,6 +144,12 @@ namespace Qqtang.UnityClient.UI
 
             var cHdr = UiFactory.CreateText(right, "房间聊天", 15, UiFactory.AccentGold, FontStyle.Bold);
             UiFactory.SetLayout(cHdr.gameObject, prefH: 24f);
+            var bgGo = new GameObject("ChatBgBanner", typeof(RectTransform), typeof(Image));
+            bgGo.transform.SetParent(right, false);
+            _chatBgBanner = bgGo.GetComponent<Image>();
+            _chatBgBanner.preserveAspect = true;
+            UiFactory.SetLayout(bgGo, flexW: 1f, prefH: 72f);
+            bgGo.SetActive(false);
             var cScroll = UiFactory.CreateScrollView(right, "RoomChatScroll", out _chatContent, spacing: 3f);
             UiFactory.SetLayout(cScroll.gameObject, flexW: 1f, flexH: 1f);
 
@@ -165,8 +173,8 @@ namespace Qqtang.UnityClient.UI
             var mTop = UiFactory.CreateEmpty(mCard, "Top");
             UiFactory.AddHLayout(mTop.gameObject, 8f, 0, 0);
             UiFactory.SetLayout(mTop.gameObject, prefH: 34f);
-            var mTitle = UiFactory.CreateText(mTop, "选择竞技地图", 17, UiFactory.AccentGold, FontStyle.Bold);
-            UiFactory.SetLayout(mTitle.gameObject, flexW: 1f, prefH: 32f);
+            _mapModalTitle = UiFactory.CreateText(mTop, "选择地图", 17, UiFactory.AccentGold, FontStyle.Bold);
+            UiFactory.SetLayout(_mapModalTitle.gameObject, flexW: 1f, prefH: 32f);
             UiFactory.CreateButton(mTop, "关闭", () => _mapModal.gameObject.SetActive(false), UiFactory.AccentMuted, width: 68f, height: 30f);
 
             _mapSearchInput = UiFactory.CreateInputField(mCard, "按地图名称或ID搜索（如：包子、水面、201）...", "");
@@ -220,6 +228,12 @@ namespace Qqtang.UnityClient.UI
             _settingsBtn.interactable = isOwner;
             _modeCycleBtn.interactable = isOwner;
             _bgBtn.gameObject.SetActive(s.GameType == RoomGameType.Chat && isOwner);
+            if (_chatBgBanner != null)
+            {
+                Sprite bgSprite = s.GameType == RoomGameType.Chat ? _ctx.Art.GetChatBgSprite(s.RoomBackgroundId % 10u) : null;
+                _chatBgBanner.sprite = bgSprite;
+                _chatBgBanner.gameObject.SetActive(bgSprite != null);
+            }
 
             // Cards summary
             string activeCards = string.Empty;
@@ -354,12 +368,18 @@ namespace Qqtang.UnityClient.UI
         private void PopulateMapList()
         {
             UiFactory.ClearChildren(_mapListContent);
+            bool isAdv = _ctx.Store.GameType == RoomGameType.Adventure;
+            var sourceMaps = _ctx.Catalogs.GetMapsForRoomType(_ctx.Store.GameType);
+            if (_mapModalTitle != null)
+                _mapModalTitle.text = isAdv ? $"选择探险关卡 ({sourceMaps.Count} 关)" : $"选择竞技地图 ({sourceMaps.Count} 张)";
+
             string q = (_mapSearchInput.text ?? string.Empty).Trim();
             int shown = 0;
-            foreach (var m in _ctx.Catalogs.Maps)
+            foreach (var m in sourceMaps)
             {
                 if (!string.IsNullOrEmpty(q) &&
                     m.Name.IndexOf(q, StringComparison.OrdinalIgnoreCase) < 0 &&
+                    (string.IsNullOrEmpty(m.Family) || m.Family.IndexOf(q, StringComparison.OrdinalIgnoreCase) < 0) &&
                     !m.MapId.ToString().Contains(q))
                     continue;
 
@@ -367,7 +387,8 @@ namespace Qqtang.UnityClient.UI
                 var row = UiFactory.CreatePanel(_mapListContent, $"Map_{id}", UiFactory.BgSlateLight);
                 UiFactory.SetLayout(row.gameObject, prefH: 34f);
                 UiFactory.AddHLayout(row.gameObject, 8f, 10, 4);
-                var lbl = UiFactory.CreateText(row, $"#{id}  {m.Name}", 13, id == _ctx.Store.MapId ? UiFactory.AccentGold : UiFactory.TextLight);
+                string famTag = !string.IsNullOrEmpty(m.Family) ? $" [{m.Family}]" : string.Empty;
+                var lbl = UiFactory.CreateText(row, $"#{id}  {m.Name}{famTag}", 13, id == _ctx.Store.MapId ? UiFactory.AccentGold : UiFactory.TextLight);
                 UiFactory.SetLayout(lbl.gameObject, flexW: 1f, prefH: 26f);
                 UiFactory.CreateButton(row, "选用", () =>
                 {
@@ -375,7 +396,7 @@ namespace Qqtang.UnityClient.UI
                     _ctx.App.RequestSelectMap(id);
                 }, UiFactory.AccentCeladon, fontSize: 12, width: 64f, height: 26f);
 
-                if (++shown >= 80) break; // Keep scroll smooth; users narrow with search box
+                if (++shown >= 90) break; // Keep scroll smooth; users narrow with search box
             }
         }
 

@@ -25,6 +25,11 @@ namespace Qqtang.Core.Protocol
         public const ushort RequestEatBomb = 0x10E2;
         public const ushort NotifyPlayerEatBomb = 0x10E3;
         public const ushort NotifyPlayerLeave = 0x10EC;
+        public const ushort RequestLaunchMachine = 0x10EF;
+        public const ushort NotifyMachineFree = 0x10F0;
+        public const ushort NotifyMachineAngry = 0x10F1;
+        public const ushort NotifyMachineGrace = 0x10F2;
+        public const ushort NotifyMachineCool = 0x10F3;
         public const ushort PlayerBeHarmed = 0x10F4;
         public const ushort RequestCancelUseProp = 0x10F5;
         public const ushort NotifyCancelUseProp = 0x10F6;
@@ -33,6 +38,7 @@ namespace Qqtang.Core.Protocol
         public const ushort NotifyProduceItem = 0x115A;
         public const ushort NotifyWrestleSkill = 0x115B;
         public const ushort RequestWrestle = 0x115C;
+        public const ushort NotifyMachineMove = 0x115D;
         public const ushort RequestPushMapElement = 0x115E;
         public const ushort NotifyPushMapElement = 0x115F;
         public const ushort NotifyMapElementKnock = 0x1160;
@@ -913,6 +919,402 @@ namespace Qqtang.Core.Protocol
         {
             var r = new BigEndianReader(body);
             return new PlayerLeaveBattleEventData { PlayerId = r.Remaining >= 2 ? r.ReadUInt16() : (ushort)0 };
+        }
+    }
+
+    // --- Machine World (0x10EF..0x10F3, 0x115D) ---
+
+    public sealed class MachineLaunchEventData
+    {
+        public byte FirstTeam;
+        public byte RoleId;
+        public ushort PlayerId;
+        public uint Time;
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(8);
+            b.WriteByte(FirstTeam);
+            b.WriteByte(RoleId);
+            b.WriteUInt16(PlayerId);
+            b.WriteUInt32(Time);
+            return b.ToArray();
+        }
+
+        public static MachineLaunchEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            return new MachineLaunchEventData
+            {
+                FirstTeam = r.ReadByte(),
+                RoleId = r.ReadByte(),
+                PlayerId = r.ReadUInt16(),
+                Time = r.ReadUInt32()
+            };
+        }
+    }
+
+    public sealed class MachineBombStateEventData
+    {
+        public ushort PlayerId;
+        public uint Time;
+        public List<(uint sceneId, byte prop, byte row, byte col)> Bombs = new List<(uint, byte, byte, byte)>();
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(7 + Bombs.Count * 7);
+            b.WriteUInt16(PlayerId);
+            b.WriteUInt32(Time);
+            b.WriteByte((byte)Bombs.Count);
+            foreach (var bm in Bombs)
+            {
+                b.WriteUInt32(bm.sceneId);
+                b.WriteByte(bm.prop);
+                b.WriteByte(bm.row);
+                b.WriteByte(bm.col);
+            }
+            return b.ToArray();
+        }
+
+        public static MachineBombStateEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            var d = new MachineBombStateEventData
+            {
+                PlayerId = r.ReadUInt16(),
+                Time = r.ReadUInt32()
+            };
+            byte count = r.ReadByte();
+            for (int i = 0; i < count && r.Remaining >= 7; i++)
+                d.Bombs.Add((r.ReadUInt32(), r.ReadByte(), r.ReadByte(), r.ReadByte()));
+            return d;
+        }
+    }
+
+    // --- Box-Push Rule 8 (0x115E..0x1163, 0x1167..0x1168, 0x0FBE) ---
+
+    public sealed class PushMapElementRequestData
+    {
+        public ushort PlayerId;
+        public byte Direction;
+        public byte Power;
+        public uint Time;
+        public byte[] Element = new byte[8];
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(16);
+            b.WriteUInt16(PlayerId);
+            b.WriteByte(Direction);
+            b.WriteByte(Power);
+            b.WriteUInt32(Time);
+            b.WriteFixedSlot(Element, 8);
+            return b.ToArray();
+        }
+
+        public static PushMapElementRequestData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            return new PushMapElementRequestData
+            {
+                PlayerId = r.ReadUInt16(),
+                Direction = r.ReadByte(),
+                Power = r.ReadByte(),
+                Time = r.ReadUInt32(),
+                Element = r.ReadBytes(8)
+            };
+        }
+    }
+
+    public sealed class PushMapElementNotifyData
+    {
+        public ushort PlayerId;
+        public byte Direction;
+        public byte Power;
+        public byte DestinationRow;
+        public byte DestinationCol;
+        public uint CurrentX;
+        public uint CurrentY;
+        public uint Time;
+        public byte[] Element = new byte[8];
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(26);
+            b.WriteUInt16(PlayerId);
+            b.WriteByte(Direction);
+            b.WriteByte(Power);
+            b.WriteByte(DestinationRow);
+            b.WriteByte(DestinationCol);
+            b.WriteUInt32(CurrentX);
+            b.WriteUInt32(CurrentY);
+            b.WriteUInt32(Time);
+            b.WriteFixedSlot(Element, 8);
+            return b.ToArray();
+        }
+
+        public static PushMapElementNotifyData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            return new PushMapElementNotifyData
+            {
+                PlayerId = r.ReadUInt16(),
+                Direction = r.ReadByte(),
+                Power = r.ReadByte(),
+                DestinationRow = r.ReadByte(),
+                DestinationCol = r.ReadByte(),
+                CurrentX = r.ReadUInt32(),
+                CurrentY = r.ReadUInt32(),
+                Time = r.ReadUInt32(),
+                Element = r.ReadBytes(8)
+            };
+        }
+    }
+
+    public sealed class DestroyBoxRequestData
+    {
+        public ushort PlayerId;
+        public uint Time;
+        public ushort PosX;
+        public ushort PosY;
+        public byte[] Element = new byte[8];
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(18);
+            b.WriteUInt16(PlayerId);
+            b.WriteUInt32(Time);
+            b.WriteUInt16(PosX);
+            b.WriteUInt16(PosY);
+            b.WriteFixedSlot(Element, 8);
+            return b.ToArray();
+        }
+
+        public static DestroyBoxRequestData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            return new DestroyBoxRequestData
+            {
+                PlayerId = r.ReadUInt16(),
+                Time = r.ReadUInt32(),
+                PosX = r.ReadUInt16(),
+                PosY = r.ReadUInt16(),
+                Element = r.ReadBytes(8)
+            };
+        }
+    }
+
+    public sealed class BoxWireData
+    {
+        public byte Row;
+        public byte Col;
+        public byte StopRow;
+        public byte StopCol;
+        public uint MapElementId;
+        public uint UniqueId;
+
+        public void WriteTo(BigEndianBuffer b)
+        {
+            b.WriteByte(Row);
+            b.WriteByte(Col);
+            b.WriteByte(StopRow);
+            b.WriteByte(StopCol);
+            b.WriteUInt32(MapElementId);
+            b.WriteUInt32(UniqueId);
+        }
+
+        public static BoxWireData ReadFrom(ref BigEndianReader r) => new BoxWireData
+        {
+            Row = r.ReadByte(),
+            Col = r.ReadByte(),
+            StopRow = r.ReadByte(),
+            StopCol = r.ReadByte(),
+            MapElementId = r.ReadUInt32(),
+            UniqueId = r.ReadUInt32()
+        };
+    }
+
+    public sealed class MapElementStopEventData
+    {
+        public uint Time;
+        public List<BoxWireData> Boxes = new List<BoxWireData>();
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(5 + Boxes.Count * 12);
+            b.WriteByte((byte)Boxes.Count);
+            b.WriteUInt32(Time);
+            foreach (var box in Boxes) box.WriteTo(b);
+            return b.ToArray();
+        }
+
+        public static MapElementStopEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            byte count = r.ReadByte();
+            var d = new MapElementStopEventData { Time = r.ReadUInt32() };
+            for (int i = 0; i < count && r.Remaining >= 12; i++)
+                d.Boxes.Add(BoxWireData.ReadFrom(ref r));
+            return d;
+        }
+    }
+
+    public sealed class GenerateBoxesEventData
+    {
+        public List<byte[]> Elements = new List<byte[]>();
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(1 + Elements.Count * 8);
+            b.WriteByte((byte)Elements.Count);
+            foreach (var el in Elements) b.WriteFixedSlot(el, 8);
+            return b.ToArray();
+        }
+
+        public static GenerateBoxesEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            byte count = r.ReadByte();
+            var d = new GenerateBoxesEventData();
+            for (int i = 0; i < count && r.Remaining >= 8; i++)
+                d.Elements.Add(r.ReadBytes(8));
+            return d;
+        }
+    }
+
+    public sealed class PlayerKnockedEventData
+    {
+        public ushort PlayerId;
+        public uint Time;
+        public ushort PosX;
+        public ushort PosY;
+        public bool IsAvatar;
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(11);
+            b.WriteUInt16(PlayerId);
+            b.WriteUInt32(Time);
+            b.WriteUInt16(PosX);
+            b.WriteUInt16(PosY);
+            b.WriteByte((byte)(IsAvatar ? 1 : 0));
+            return b.ToArray();
+        }
+
+        public static PlayerKnockedEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            return new PlayerKnockedEventData
+            {
+                PlayerId = r.ReadUInt16(),
+                Time = r.ReadUInt32(),
+                PosX = r.ReadUInt16(),
+                PosY = r.ReadUInt16(),
+                IsAvatar = r.ReadByte() != 0
+            };
+        }
+    }
+
+    public sealed class MapElementsExplodedEventData
+    {
+        public ushort PlayerId;
+        public uint Time;
+        public List<byte[]> Elements = new List<byte[]>();
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(7 + Elements.Count * 8);
+            b.WriteUInt16(PlayerId);
+            b.WriteUInt32(Time);
+            b.WriteByte((byte)Elements.Count);
+            foreach (var el in Elements) b.WriteFixedSlot(el, 8);
+            return b.ToArray();
+        }
+
+        public static MapElementsExplodedEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            var d = new MapElementsExplodedEventData { PlayerId = r.ReadUInt16(), Time = r.ReadUInt32() };
+            byte count = r.ReadByte();
+            for (int i = 0; i < count && r.Remaining >= 8; i++)
+                d.Elements.Add(r.ReadBytes(8));
+            return d;
+        }
+    }
+
+    // --- Prepared Prop Cancel & Trigger (0x10F5..0x10F7) ---
+
+    public sealed class CancelUsePropEventData
+    {
+        public ushort PlayerId;
+        public uint PropId;
+        public uint Time;
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(10);
+            b.WriteUInt16(PlayerId);
+            b.WriteUInt32(PropId);
+            b.WriteUInt32(Time);
+            return b.ToArray();
+        }
+
+        public static CancelUsePropEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            return new CancelUsePropEventData { PlayerId = r.ReadUInt16(), PropId = r.ReadUInt32(), Time = r.ReadUInt32() };
+        }
+    }
+
+    public sealed class PropTriggerEventData
+    {
+        public uint PropGuid;
+        public uint GameTime;
+        public ushort UserId;
+        public uint PosX;
+        public uint PosY;
+        public byte Dir;
+        public List<(ushort playerId, uint posX, uint posY, byte dir)> AffectedPlayers = new List<(ushort, uint, uint, byte)>();
+        public uint TypeId;
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(24 + AffectedPlayers.Count * 11);
+            b.WriteUInt32(PropGuid);
+            b.WriteUInt32(GameTime);
+            b.WriteUInt16(UserId);
+            b.WriteUInt32(PosX);
+            b.WriteUInt32(PosY);
+            b.WriteByte(Dir);
+            b.WriteByte((byte)AffectedPlayers.Count);
+            foreach (var a in AffectedPlayers)
+            {
+                b.WriteUInt16(a.playerId);
+                b.WriteUInt32(a.posX);
+                b.WriteUInt32(a.posY);
+                b.WriteByte(a.dir);
+            }
+            b.WriteUInt32(TypeId);
+            return b.ToArray();
+        }
+
+        public static PropTriggerEventData Parse(byte[] body)
+        {
+            var r = new BigEndianReader(body);
+            var d = new PropTriggerEventData
+            {
+                PropGuid = r.ReadUInt32(),
+                GameTime = r.ReadUInt32(),
+                UserId = r.ReadUInt16(),
+                PosX = r.ReadUInt32(),
+                PosY = r.ReadUInt32(),
+                Dir = r.ReadByte()
+            };
+            byte count = r.ReadByte();
+            for (int i = 0; i < count && r.Remaining >= 11; i++)
+                d.AffectedPlayers.Add((r.ReadUInt16(), r.ReadUInt32(), r.ReadUInt32(), r.ReadByte()));
+            if (r.Remaining >= 4) d.TypeId = r.ReadUInt32();
+            return d;
         }
     }
 }

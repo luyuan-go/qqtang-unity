@@ -104,13 +104,14 @@ namespace Qqtang.UnityClient.UI
             _hotbarText = UiFactory.CreateText(botBar, "", 12, UiFactory.TextLight);
             UiFactory.SetLayout(_hotbarText.gameObject, flexW: 1f, prefH: 38f);
 
-            UiFactory.CreateButton(botBar, "针(1)", () => _ctx.App.TriggerBattleWorldItem(63), UiFactory.AccentCeladon, fontSize: 11, width: 52f, height: 30f);
-            UiFactory.CreateButton(botBar, "陷(2)", () => _ctx.App.TriggerBattleWorldItem(41), UiFactory.AccentVermilion, fontSize: 11, width: 52f, height: 30f);
-            UiFactory.CreateButton(botBar, "蕉(3)", () => _ctx.App.TriggerBattleWorldItem(42), UiFactory.AccentGold, UiFactory.TextInk, fontSize: 11, width: 52f, height: 30f);
-            UiFactory.CreateButton(botBar, "胶(4)", () => _ctx.App.TriggerBattleWorldItem(43), UiFactory.AccentCeladon, fontSize: 11, width: 52f, height: 30f);
-            UiFactory.CreateButton(botBar, "镖(5)", () => _ctx.App.TriggerBattleProjectileItem(), UiFactory.AccentMuted, fontSize: 11, width: 52f, height: 30f);
-            UiFactory.CreateButton(botBar, "遥(6)", () => _ctx.App.TriggerBattleWorldItem(64), UiFactory.AccentMuted, fontSize: 11, width: 52f, height: 30f);
-            UiFactory.CreateButton(botBar, "表(E)", () => _ctx.App.TriggerBattleEmotion(1), UiFactory.AccentMuted, fontSize: 11, width: 52f, height: 30f);
+            UiFactory.CreateButton(botBar, "针(1)", () => _ctx.App.TriggerBattleWorldItem(63), UiFactory.AccentCeladon, fontSize: 11, width: 48f, height: 30f);
+            UiFactory.CreateButton(botBar, "陷(2)", () => _ctx.App.TriggerBattleWorldItem(41), UiFactory.AccentVermilion, fontSize: 11, width: 48f, height: 30f);
+            UiFactory.CreateButton(botBar, "蕉(3)", () => _ctx.App.TriggerBattleWorldItem(42), UiFactory.AccentGold, UiFactory.TextInk, fontSize: 11, width: 48f, height: 30f);
+            UiFactory.CreateButton(botBar, "胶(4)", () => _ctx.App.TriggerBattleWorldItem(43), UiFactory.AccentCeladon, fontSize: 11, width: 48f, height: 30f);
+            UiFactory.CreateButton(botBar, "镖(5)", () => _ctx.App.TriggerBattleProjectileItem(), UiFactory.AccentMuted, fontSize: 11, width: 48f, height: 30f);
+            UiFactory.CreateButton(botBar, "遥(6)", () => _ctx.App.TriggerBattleWorldItem(64), UiFactory.AccentMuted, fontSize: 11, width: 48f, height: 30f);
+            UiFactory.CreateButton(botBar, "绝技(F)", () => _ctx.App.TriggerBattleModeSkill(), UiFactory.AccentVermilion, fontSize: 11, width: 58f, height: 30f);
+            UiFactory.CreateButton(botBar, "表(E)", () => _ctx.App.TriggerBattleEmotion(1), UiFactory.AccentMuted, fontSize: 11, width: 48f, height: 30f);
 
             // In-battle Mini Chat (bottom-left above bottom bar)
             var miniChatBox = UiFactory.CreateEmpty(HudRoot, "BattleMiniChat");
@@ -270,7 +271,8 @@ namespace Qqtang.UnityClient.UI
 
             string artTag = _ctx.Art.GetResolvedSource("characters/role_0_S");
             string artLabel = artTag == "daoist" ? "道风重制" : (artTag == "original" ? "原版兜底" : "程序渲染");
-            string modePrefix = sim.IsOfflineSoloMode ? "[离线演武] " : string.Empty;
+            string ruleTag = RuleDisplayName(sim.NativeRule);
+            string modePrefix = sim.IsOfflineSoloMode ? "[离线] " : $"[{ruleTag}] ";
             _mapAndArtText.text = $"{modePrefix}{_ctx.Catalogs.GetMapName(mapId)} ({mapId}) [{artLabel}]";
 
             if (sim.ElapsedMs < Rule1BattleSimulation.RoundStartClockMs)
@@ -329,7 +331,11 @@ namespace Qqtang.UnityClient.UI
             if (local != null)
             {
                 string status = string.Empty;
+                if (local.MaxNativeHitPoints > 0) status += $" 命:{local.NativeHitPoints}/{local.MaxNativeHitPoints}";
                 if (local.IsInvulnerable(sim.ElapsedMs)) status += " [护盾]";
+                if ((local.PassiveEffects & PassiveFunctionEffectMask.Lightning) != 0) status += " [雷电]";
+                if ((local.PassiveEffects & PassiveFunctionEffectMask.SwordArc) != 0) status += " [剑气]";
+                if ((local.PassiveEffects & PassiveFunctionEffectMask.KickImpact) != 0) status += " [少林踢]";
                 if (local.MovementStatus == MovementStatusKind.ForcedSlide) status += " [冰滑]";
                 else if (local.MovementStatus == MovementStatusKind.Slow) status += " [胶水减速]";
                 else if (local.MovementStatus == MovementStatusKind.Fast) status += " [极速]";
@@ -419,5 +425,21 @@ namespace Qqtang.UnityClient.UI
         }
 
         public void HideSettlement() => SettlementRoot.gameObject.SetActive(false);
+
+        private static string RuleDisplayName(uint rule)
+        {
+            switch (rule)
+            {
+                case 2: return "踢泡";
+                case 3: return "抢包山";
+                case 4: return "比武";
+                case 5: return "夺宝";
+                case 6: return "雕像";
+                case 7: return "机械";
+                case 8: return "推箱";
+                case 13: return "坦克";
+                default: return "竞技";
+            }
+        }
     }
 }

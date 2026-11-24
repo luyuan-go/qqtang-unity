@@ -251,7 +251,7 @@ namespace Qqtang.UnityClient.UI
             UiFactory.SetLayout(_artStatsText.gameObject, prefH: 22f);
 
             var guide = UiFactory.CreateText(sCard,
-                "操作键位：WASD/方向键 移动 | Space/J 放泡 | 1 扎针 | 2 陷阱 | 3 香蕉 | 4 胶水 | 5 飞镖/斧 | 6 遥控 | E 表情 | Enter 聊天 | Esc 菜单",
+                "操作键位：WASD/方向键 移动 | Space/J 放泡 | 1 扎针 | 2 陷阱 | 3 香蕉 | 4 胶水 | 5 飞镖/斧 | 6 遥控 | F 绝技/战备 | C 取消 | E 表情 | Enter 聊天 | Esc 菜单",
                 12, UiFactory.TextSubtle);
             UiFactory.SetLayout(guide.gameObject, prefH: 38f);
 

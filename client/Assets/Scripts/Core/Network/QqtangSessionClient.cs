@@ -568,13 +568,47 @@ namespace Qqtang.Core.Network
             return KinBadgeResultData.Parse(reply.Payload);
         }
 
-        public async Task<ushort> UpdateKinTitleAsync(uint kinIndex, string title, CancellationToken ct = default)
+        public async Task<KinSimpleResultData> UpdateKinTitleAsync(uint kinIndex, string title, CancellationToken ct = default)
         {
-            byte[] payload = ExtendedRequestBuilder.BuildUpdateKinTitlePayload(Uin, NextClientTime(), kinIndex, title);
+            string formatted = FormatKinAuthorityTitles(title);
+            byte[] payload = ExtendedRequestBuilder.BuildUpdateKinTitlePayload(Uin, NextClientTime(), kinIndex, formatted);
             DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.UpdateKinTitle, 2, SectionId, payload, ct).ConfigureAwait(false);
             var r = new BigEndianReader(reply.Payload);
             r.ReadUInt32(); // UIN
-            return r.ReadUInt16();
+            var res = new KinSimpleResultData
+            {
+                Result = r.ReadUInt16(),
+                KinIndex = kinIndex
+            };
+            if (r.Remaining >= 2)
+            {
+                ushort textLen = r.ReadUInt16();
+                if (textLen > 0 && r.Remaining >= textLen) r.Skip(textLen);
+            }
+            if (r.Remaining >= 2)
+            {
+                ushort reasonLen = r.ReadUInt16();
+                if (reasonLen > 0 && r.Remaining >= reasonLen)
+                    res.Reason = LegacyTextEncoding.DecodeNullTerminated(r.ReadBytes(reasonLen));
+            }
+            return res;
+        }
+
+        private static string FormatKinAuthorityTitles(string input)
+        {
+            if (!string.IsNullOrEmpty(input) && input.IndexOf('\x07') >= 0) return input;
+            string[] defaults = { "掌门", "副掌门", "长老", "精英", "弟子" };
+            string[] raw = string.IsNullOrWhiteSpace(input)
+                ? defaults
+                : input.Split(new[] { ',', '，', '/', '|' }, StringSplitOptions.RemoveEmptyEntries);
+            var parts = new string[5];
+            for (int i = 0; i < 5; i++)
+            {
+                string p = (i < raw.Length && !string.IsNullOrWhiteSpace(raw[i])) ? raw[i].Trim() : defaults[i];
+                if (p.Length > 5) p = p.Substring(0, 5); // <= 10 GBK bytes guaranteed
+                parts[i] = p;
+            }
+            return string.Join("\x07", parts) + "\x07";
         }
 
         public async Task<AcrossSectionChatResponseData> SendAcrossSectionChatAsync(string content, uint dstUin = 0, CancellationToken ct = default)
@@ -705,6 +739,37 @@ namespace Qqtang.Core.Network
         {
             var ev = new WrestleActionEventData { SkillType = skillType, FirstTeam = firstTeam, PlayerPos = playerPos, PlayerId = PlayerId, Time = gameTimeMs };
             await SendGameEventTcpAsync(roomId, ModeEventSchemas.RequestWrestle, ev.Marshal(), ct).ConfigureAwait(false);
+        }
+
+        public async Task SendLaunchMachineAsync(ushort roomId, byte firstTeam, byte roleId, uint gameTimeMs, CancellationToken ct = default)
+        {
+            var ev = new MachineLaunchEventData { FirstTeam = firstTeam, RoleId = roleId, PlayerId = PlayerId, Time = gameTimeMs };
+            await SendGameEventTcpAsync(roomId, ModeEventSchemas.RequestLaunchMachine, ev.Marshal(), ct).ConfigureAwait(false);
+        }
+
+        public async Task SendCancelUsePropAsync(ushort roomId, uint propId, uint gameTimeMs, CancellationToken ct = default)
+        {
+            var ev = new CancelUsePropEventData { PlayerId = PlayerId, PropId = propId, Time = gameTimeMs };
+            await SendGameEventTcpAsync(roomId, ModeEventSchemas.RequestCancelUseProp, ev.Marshal(), ct).ConfigureAwait(false);
+        }
+
+        public async Task SendPushBoxRequestAsync(ushort roomId, byte direction, byte power, byte[] element8, uint gameTimeMs, CancellationToken ct = default)
+        {
+            var ev = new PushMapElementRequestData { PlayerId = PlayerId, Direction = direction, Power = power, Time = gameTimeMs, Element = element8 ?? new byte[8] };
+            await SendGameEventTcpAsync(roomId, ModeEventSchemas.RequestPushMapElement, ev.Marshal(), ct).ConfigureAwait(false);
+        }
+
+        public async Task SendDestroyBoxRequestAsync(ushort roomId, ushort posX, ushort posY, byte[] element8, uint gameTimeMs, CancellationToken ct = default)
+        {
+            var ev = new DestroyBoxRequestData { PlayerId = PlayerId, Time = gameTimeMs, PosX = posX, PosY = posY, Element = element8 ?? new byte[8] };
+            await SendGameEventTcpAsync(roomId, ModeEventSchemas.RequestDestroyBox, ev.Marshal(), ct).ConfigureAwait(false);
+        }
+
+        public async Task<KinSimpleResultData> SetKinAuthorityTextAsync(uint kinIndex, string titleText, CancellationToken ct = default)
+        {
+            byte[] payload = ExtendedRequestBuilder.BuildSetKinNotificationPayload(Uin, NextClientTime(), kinIndex, titleText);
+            DecodedLocalPacket reply = await SendRequestAsync(ExtendedGameCommands.SetKinAuthority, 2, SectionId, payload, ct).ConfigureAwait(false);
+            return KinSimpleResultData.ParseText(reply.Payload, true);
         }
 
         public async Task SendPeerGameplayAsync(

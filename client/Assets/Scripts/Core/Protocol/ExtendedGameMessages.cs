@@ -38,6 +38,7 @@ namespace Qqtang.Core.Protocol
         public const ushort DismissKin = 0x00C2;
         public const ushort KinEventNotify = 0x00C4;
         public const ushort AssignKinAuthority = 0x00C5;
+        public const ushort SetKinAuthority = 0x00C6;
         public const ushort SetKinBadge = 0x00C7;
         public const ushort FetchKinTop = 0x00CB;
         public const ushort CombineForge = 0x00CF;
@@ -1664,32 +1665,70 @@ namespace Qqtang.Core.Protocol
     {
         public byte Row;
         public byte Col;
-        public byte ItemType;
+        public uint ItemType;
         public byte SubType;
         public uint ItemId;
+        public uint DispatchTime;
     }
 
     public sealed class DispatchItemEventData
     {
         public uint Time;
         public List<DispatchedGameItem> Items = new List<DispatchedGameItem>();
+        public List<DispatchedGameItem> DelayedItems = new List<DispatchedGameItem>();
+
+        public byte[] Marshal()
+        {
+            var b = new BigEndianBuffer(6 + Items.Count * 6 + DelayedItems.Count * 10);
+            b.WriteUInt32(Time);
+            b.WriteByte((byte)Items.Count);
+            foreach (var it in Items)
+            {
+                b.WriteUInt32(it.ItemId != 0 ? it.ItemId : it.ItemType);
+                b.WriteByte(it.Row);
+                b.WriteByte(it.Col);
+            }
+            b.WriteByte((byte)DelayedItems.Count);
+            foreach (var d in DelayedItems)
+            {
+                b.WriteUInt32(d.ItemId);
+                b.WriteUInt32(d.DispatchTime);
+            }
+            foreach (var d in DelayedItems) b.WriteByte(d.Row);
+            foreach (var d in DelayedItems) b.WriteByte(d.Col);
+            return b.ToArray();
+        }
 
         public static DispatchItemEventData Parse(byte[] body)
         {
             var r = new BigEndianReader(body);
             var d = new DispatchItemEventData { Time = r.ReadUInt32() };
             byte count = r.ReadByte();
-            for (int i = 0; i < count && r.Remaining >= 8; i++)
+            for (int i = 0; i < count && r.Remaining >= 6; i++)
             {
-                // GAME_ITEM wire size = 8 bytes (Row, Col, Type, SubType, u32 ID or similar)
-                d.Items.Add(new DispatchedGameItem
+                uint id = r.ReadUInt32();
+                byte row = r.ReadByte();
+                byte col = r.ReadByte();
+                d.Items.Add(new DispatchedGameItem { ItemId = id, ItemType = id, Row = row, Col = col });
+            }
+            if (r.Remaining >= 1)
+            {
+                byte delayedCount = r.ReadByte();
+                if (delayedCount > 0 && r.Remaining >= delayedCount * 10)
                 {
-                    Row = r.ReadByte(),
-                    Col = r.ReadByte(),
-                    ItemType = r.ReadByte(),
-                    SubType = r.ReadByte(),
-                    ItemId = r.ReadUInt32()
-                });
+                    var ids = new uint[delayedCount];
+                    var times = new uint[delayedCount];
+                    for (int i = 0; i < delayedCount; i++) { ids[i] = r.ReadUInt32(); times[i] = r.ReadUInt32(); }
+                    var rows = r.ReadBytes(delayedCount);
+                    var cols = r.ReadBytes(delayedCount);
+                    for (int i = 0; i < delayedCount; i++)
+                    {
+                        d.DelayedItems.Add(new DispatchedGameItem
+                        {
+                            ItemId = ids[i], ItemType = ids[i], DispatchTime = times[i], Row = rows[i], Col = cols[i]
+                        });
+                    }
+                }
             }
             return d;
         }

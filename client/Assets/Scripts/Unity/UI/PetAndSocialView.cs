@@ -175,9 +175,10 @@ namespace Qqtang.UnityClient.UI
             var kinDeclRow = UiFactory.CreateEmpty(kinLeft, "KinDeclRow");
             UiFactory.AddHLayout(kinDeclRow.gameObject, 6f, 0, 0);
             UiFactory.SetLayout(kinDeclRow.gameObject, prefH: 32f);
-            _kinDeclInput = UiFactory.CreateInputField(kinDeclRow, "新家族宣言...", "", height: 28f);
-            UiFactory.CreateButton(kinDeclRow, "改宣言", () => _ctx.App.RequestSetKinDeclaration(_kinDeclInput.text.Trim()), UiFactory.AccentMuted, fontSize: 12, width: 68f, height: 28f);
-            UiFactory.CreateButton(kinDeclRow, "刷新排行", () => _ctx.App.RequestRefreshKinTop(), UiFactory.AccentCeladon, fontSize: 12, width: 76f, height: 28f);
+            _kinDeclInput = UiFactory.CreateInputField(kinDeclRow, "新家族宣言/称号...", "", height: 28f);
+            UiFactory.CreateButton(kinDeclRow, "改宣言", () => _ctx.App.RequestSetKinDeclaration(_kinDeclInput.text.Trim()), UiFactory.AccentMuted, fontSize: 12, width: 62f, height: 28f);
+            UiFactory.CreateButton(kinDeclRow, "改称号", () => _ctx.App.RequestUpdateKinTitle(_kinDeclInput.text.Trim()), UiFactory.AccentMuted, fontSize: 12, width: 62f, height: 28f);
+            UiFactory.CreateButton(kinDeclRow, "刷新排行", () => _ctx.App.RequestRefreshKinTop(), UiFactory.AccentCeladon, fontSize: 12, width: 72f, height: 28f);
 
             var kmScroll = UiFactory.CreateScrollView(kinLeft, "KinMembers", out _kinMembersContent, spacing: 4f);
             UiFactory.SetLayout(kmScroll.gameObject, flexW: 1f, flexH: 1f);
@@ -289,6 +290,13 @@ namespace Qqtang.UnityClient.UI
                 var row = UiFactory.CreatePanel(_petsContent, $"Pet_{p.PetId}", UiFactory.BgSlateLight, p.IsActive ? UiFactory.AccentGold : UiFactory.BorderSubtle);
                 UiFactory.SetLayout(row.gameObject, prefH: 52f);
                 UiFactory.AddHLayout(row.gameObject, 6f, 10, 6);
+
+                var pIconGo = new GameObject("PetPortrait", typeof(RectTransform), typeof(Image));
+                pIconGo.transform.SetParent(row, false);
+                var pImg = pIconGo.GetComponent<Image>();
+                pImg.sprite = _ctx.Art.GetPetSprite(p.PetTypeId);
+                pImg.preserveAspect = true;
+                UiFactory.SetLayout(pIconGo, prefW: 36f, prefH: 36f);
 
                 string typeName = _ctx.Catalogs.GetPetTypeName(p.PetTypeId);
                 var lbl = UiFactory.CreateText(row, $"{p.Name} [{typeName}] Lv.{p.Level} | 经验:{p.Experience} 忠诚:{p.Loyalty} 心情:{p.Mood} {(p.IsActive ? "★出战中" : "")}", 13,

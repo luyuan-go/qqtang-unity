@@ -46,6 +46,7 @@ namespace Qqtang.Core.Battle
         public uint NativeGridAttr;
         public bool NativeGridAttrSet;
         public uint NativePlayerExitAttr;
+        public bool NativePlayerExitAttrSet;
         public bool MapElementOccupied;
         public bool Pushable;
         public byte Durability;
@@ -53,6 +54,24 @@ namespace Qqtang.Core.Battle
         public int VisualGroundElementId;
         public int VisualSceneElementId;
         public int VisualOverlayElementId;
+
+        /// <summary>
+        /// Exact native directional exit predicate (bit 0=Right, 1=Up, 2=Left, 3=Down)
+        /// matching server/internal/game/battleengine/movement.go:82-84.
+        /// </summary>
+        public bool PlayerExitPassable(BattleDirection dir)
+        {
+            if (!NativeGridAttrSet && !NativePlayerExitAttrSet) return true;
+            uint attr = NativePlayerExitAttrSet ? NativePlayerExitAttr : NativeGridAttr;
+            switch (dir)
+            {
+                case BattleDirection.Right: return (attr & 1u) != 0;
+                case BattleDirection.Up: return (attr & 2u) != 0;
+                case BattleDirection.Left: return (attr & 4u) != 0;
+                case BattleDirection.Down: return (attr & 8u) != 0;
+                default: return true;
+            }
+        }
     }
 
     public sealed class LoadedMapData
@@ -104,6 +123,7 @@ namespace Qqtang.Core.Battle
         private static readonly Regex SizeRegex = new Regex(@"^size\s*=\s*\(\s*([0-9]+)\s*,\s*([0-9]+)\s*\)\s*$", RegexOptions.Compiled);
         private static readonly Regex AttrsRegex = new Regex(@"^GridAttr\s*=\s*\(([^)]*)\)\s*$", RegexOptions.Compiled);
         private static readonly Regex MapDescEntryRegex = new Regex(@"^\s*([0-9]+)\s*:\s*\[.*?['""]([^'""]+\.map)['""]", RegexOptions.Compiled);
+        private static readonly Regex MapDescTupleRegex = new Regex(@"^\(\s*([0-9]+)\s*,\s*'[^']+'\s*,\s*'[^']*'\s*,\s*[0-9]+\s*,\s*[0-9]+\s*,\s*[0-9]+\s*,\s*'([^']+\.map)'", RegexOptions.Compiled);
 
         public static Dictionary<uint, MapElementDef> LoadMapElementsPy(string mapElemPyPath)
         {
@@ -179,12 +199,19 @@ namespace Qqtang.Core.Battle
             var result = new Dictionary<uint, string>();
             if (!File.Exists(mapDescPyPath)) return result;
 
-            // Parse patterns like id = 201 ... mapFile = 'town01.map' or dict literals
+            string text = Qqtang.Core.Protocol.LegacyTextEncoding.DecodeNullTerminated(File.ReadAllBytes(mapDescPyPath));
             uint? currentId = null;
             var idLine = new Regex(@"(?:^|\b)(?:id|mapID|MapID)\s*=\s*([0-9]+)");
             var fileLine = new Regex(@"['""]([A-Za-z0-9_\-]+\.map)['""]");
-            foreach (string line in File.ReadLines(mapDescPyPath))
+            foreach (string rawLine in text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
             {
+                string line = rawLine.Trim();
+                Match tm = MapDescTupleRegex.Match(line);
+                if (tm.Success)
+                {
+                    result[uint.Parse(tm.Groups[1].Value)] = tm.Groups[2].Value;
+                    continue;
+                }
                 Match dm = MapDescEntryRegex.Match(line);
                 if (dm.Success)
                 {
@@ -290,7 +317,11 @@ namespace Qqtang.Core.Battle
                                 projected.FlamePassable = (attr & 0xF00u) != 0;
                                 projected.NativeGridAttr = attr;
                                 projected.NativeGridAttrSet = true;
-                                if (layer == 0) projected.NativePlayerExitAttr = attr;
+                                if (layer == 0)
+                                {
+                                    projected.NativePlayerExitAttr = attr;
+                                    projected.NativePlayerExitAttrSet = true;
+                                }
                                 projected.Durability = def.LifeTime > 0 ? (byte)Math.Min(255, def.LifeTime) : (byte)0;
                                 if ((attr & 0xFu) == 0)
                                     projected.Collision = def.LifeTime > 0 ? CellCollision.Breakable : CellCollision.Solid;

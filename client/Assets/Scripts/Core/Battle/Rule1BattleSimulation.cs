@@ -36,6 +36,19 @@ namespace Qqtang.Core.Battle
         SculptureDefense = 3
     }
 
+    public enum BattleLifecycleKind : byte
+    {
+        PermanentElimination = 0,
+        TimedRespawn = 1,
+        NativeDurability = 2
+    }
+
+    public struct ScheduledPickup
+    {
+        public uint SceneId;
+        public uint DueMs;
+    }
+
     [Flags]
     public enum BattleAudioCue : uint
     {
@@ -160,6 +173,13 @@ namespace Qqtang.Core.Battle
         public uint TreasureScore;
         public PassiveFunctionEffectMask PassiveEffects;
         public int[] BasicPickupDelta = new int[3]; // [0]=Cap(1), [1]=Pow(2), [2]=Spd(3) for death drops
+
+        // Rule-specific lifecycle (TimedRespawn & NativeDurability Rules 7/8)
+        public GridCell SpawnCell;
+        public uint RespawnAtMs;
+        public byte NativeHitPoints;
+        public byte MaxNativeHitPoints;
+        public uint ActivePreparedPropId;
 
         // Remote interpolation target
         public int TargetPosX;
@@ -351,6 +371,8 @@ namespace Qqtang.Core.Battle
         };
 
         public uint GameId { get; private set; }
+        public uint NativeRule { get; private set; } = 1;
+        public BattleLifecycleKind Lifecycle { get; private set; } = BattleLifecycleKind.PermanentElimination;
         public ushort LocalPlayerId { get; private set; }
         public ushort ArbitratorPlayerId { get; private set; }
         public uint ElapsedMs { get; private set; }
@@ -362,6 +384,7 @@ namespace Qqtang.Core.Battle
         public List<ActiveBomb> Bombs { get; } = new List<ActiveBomb>();
         public List<ActiveFlame> Flames { get; } = new List<ActiveFlame>();
         public List<FieldPickup> Pickups { get; } = new List<FieldPickup>();
+        public List<ScheduledPickup> ScheduledPickups { get; } = new List<ScheduledPickup>();
         public List<BattleFieldObject> FieldObjects { get; } = new List<BattleFieldObject>();
         public List<BattleProjectile> Projectiles { get; } = new List<BattleProjectile>();
         public List<BattleBossEntity> Bosses { get; } = new List<BattleBossEntity>();
@@ -546,6 +569,26 @@ namespace Qqtang.Core.Battle
 
             bomb.Cell = to;
             StepAudioCues |= BattleAudioCue.BombKick;
+            if (NativeRule == 2) // KickBomb native rule speaks PlayerThrowBomb (0x1159)
+            {
+                var kick = new KickBombActionData
+                {
+                    FromRow = (byte)from.Row,
+                    FromCol = (byte)from.Col,
+                    DestRow = (byte)to.Row,
+                    DestCol = (byte)to.Col,
+                    BombProp = 0,
+                    Direction = ToNativeDirectionCode(dir),
+                    Power = bomb.Power,
+                    Time = ElapsedMs,
+                    PlayerId = local.PlayerId,
+                    BombPower = bomb.Power
+                };
+                byte[] kickBody = kick.Marshal();
+                OutgoingPeerEvents.Add((ModeEventSchemas.PlayerThrowBomb, kickBody));
+                OutgoingTcpEvents.Add((ModeEventSchemas.PlayerThrowBomb, kickBody));
+                return true;
+            }
             var msg = new MoveBombEventData
             {
                 PlayerId = local.PlayerId,
@@ -562,6 +605,121 @@ namespace Qqtang.Core.Battle
             byte[] body = msg.Marshal();
             OutgoingPeerEvents.Add((ExtendedGameEventSchemas.RequestMoveBomb, body));
             OutgoingTcpEvents.Add((ExtendedGameEventSchemas.RequestMoveBomb, body));
+            return true;
+        }
+
+        /// <summary>
+        /// Contextual special skill for native competitive rules (F key):
+        ///   Rule 7 (Machine) -> RequestLaunchMachine (0x10EF)
+        ///   Rule 4 (Wrestle) -> RequestWrestle (0x115C)
+        ///   Rule 8 (Box)     -> RequestPushMapElement (0x115E) / RequestDestroyBox (0x1163)
+        ///   Other            -> RequestPreparedUseProp (0x1174) when preparedPropItemId != 0
+        /// </summary>
+        public bool TryTriggerModeSkill(uint preparedPropItemId = 0)
+        {
+            BattleActor local = LocalActor;
+            if (local == null || IsFinished || ElapsedMs < RoundStartClockMs) return false;
+            if (local.State != ActorLifeState.Active && preparedPropItemId == 0) return false;
+
+            if (NativeRule == 7) // Machine World launch
+            {
+                var launch = new MachineLaunchEventData
+                {
+                    FirstTeam = local.TeamId,
+                    RoleId = local.RoleId > 0 ? local.RoleId : (byte)1,
+                    PlayerId = local.PlayerId,
+                    Time = ElapsedMs
+                };
+                byte[] body = launch.Marshal();
+                OutgoingPeerEvents.Add((ModeEventSchemas.RequestLaunchMachine, body));
+                OutgoingTcpEvents.Add((ModeEventSchemas.RequestLaunchMachine, body));
+                StepAudioCues |= BattleAudioCue.Wave;
+                return true;
+            }
+            if (NativeRule == 4) // Wrestle skill burst
+            {
+                var wr = new WrestleActionEventData
+                {
+                    SkillType = 1,
+                    FirstTeam = local.TeamId,
+                    PlayerPos = (byte)((local.CurrentCell.Row << 4) | (local.CurrentCell.Col & 0x0F)),
+                    PlayerId = local.PlayerId,
+                    Time = ElapsedMs
+                };
+                byte[] body = wr.Marshal();
+                OutgoingPeerEvents.Add((ModeEventSchemas.RequestWrestle, body));
+                OutgoingTcpEvents.Add((ModeEventSchemas.RequestWrestle, body));
+                local.MovementStatus = MovementStatusKind.Fast;
+                local.MovementStatusExpiresAtMs = ElapsedMs + 2000;
+                StepAudioCues |= BattleAudioCue.Wave;
+                return true;
+            }
+            if (NativeRule == 8) // Box-Push: push or destroy adjacent box
+            {
+                BattleDirection dir = local.Facing == BattleDirection.None ? BattleDirection.Down : local.Facing;
+                var (dr, dc) = DirectionDelta(dir);
+                GridCell front = new GridCell(local.CurrentCell.Row + dr, local.CurrentCell.Col + dc);
+                if (Map.InBounds(front.Row, front.Col) && Map.GetCell(front.Row, front.Col).Collision == CellCollision.Breakable)
+                {
+                    var tile = Map.GetCell(front.Row, front.Col);
+                    byte[] el = new byte[8];
+                    el[0] = (byte)front.Row;
+                    el[1] = (byte)front.Col;
+                    uint eid = tile.MapElementId != 0 ? tile.MapElementId : 1u;
+                    el[4] = (byte)(eid >> 24); el[5] = (byte)(eid >> 16); el[6] = (byte)(eid >> 8); el[7] = (byte)eid;
+                    GridCell dst = new GridCell(front.Row + dr, front.Col + dc);
+                    if (Map.InBounds(dst.Row, dst.Col) && Map.GetCell(dst.Row, dst.Col).Collision == CellCollision.Open && !HasBombAt(dst))
+                    {
+                        ApplyMapElementSlide(front, dst);
+                        var req = new PushMapElementRequestData
+                        {
+                            PlayerId = local.PlayerId, Direction = ToNativeDirectionCode(dir), Power = local.BombPower, Time = ElapsedMs, Element = el
+                        };
+                        byte[] body = req.Marshal();
+                        OutgoingPeerEvents.Add((ModeEventSchemas.RequestPushMapElement, body));
+                        OutgoingTcpEvents.Add((ModeEventSchemas.RequestPushMapElement, body));
+                        StepAudioCues |= BattleAudioCue.WoodPush;
+                        return true;
+                    }
+                    var destroy = new DestroyBoxRequestData
+                    {
+                        PlayerId = local.PlayerId, Time = ElapsedMs,
+                        PosX = (ushort)Math.Max(0, local.PosX), PosY = (ushort)Math.Max(0, local.PosY), Element = el
+                    };
+                    byte[] dBody = destroy.Marshal();
+                    OutgoingPeerEvents.Add((ModeEventSchemas.RequestDestroyBox, dBody));
+                    OutgoingTcpEvents.Add((ModeEventSchemas.RequestDestroyBox, dBody));
+                    StepAudioCues |= BattleAudioCue.WoodBreak;
+                    return true;
+                }
+            }
+            if (preparedPropItemId > 0)
+            {
+                local.ActivePreparedPropId = preparedPropItemId;
+                var prep = new PreparedUsePropEventData
+                {
+                    PlayerId = local.PlayerId, ItemId = preparedPropItemId,
+                    PosX = (ushort)Math.Max(0, local.PosX), PosY = (ushort)Math.Max(0, local.PosY)
+                };
+                byte[] body = prep.Marshal();
+                OutgoingPeerEvents.Add((ModeEventSchemas.RequestPreparedUseProp, body));
+                OutgoingTcpEvents.Add((ModeEventSchemas.RequestPreparedUseProp, body));
+                StepAudioCues |= BattleAudioCue.Pickup;
+                return true;
+            }
+            return false;
+        }
+
+        public bool TryCancelPreparedProp()
+        {
+            BattleActor local = LocalActor;
+            if (local == null || local.ActivePreparedPropId == 0) return false;
+            uint propId = local.ActivePreparedPropId;
+            local.ActivePreparedPropId = 0;
+            var cancel = new CancelUsePropEventData { PlayerId = local.PlayerId, PropId = propId, Time = ElapsedMs };
+            byte[] body = cancel.Marshal();
+            OutgoingPeerEvents.Add((ModeEventSchemas.RequestCancelUseProp, body));
+            OutgoingTcpEvents.Add((ModeEventSchemas.RequestCancelUseProp, body));
             return true;
         }
 
@@ -623,19 +781,43 @@ namespace Qqtang.Core.Battle
         public static RoleCombatProfile GetRoleProfile(byte roleId) =>
             CombatProfiles.TryGetValue(roleId, out var p) ? p : new RoleCombatProfile(2, 6, 2, 8, 4, 7);
 
+        public static BattleLifecycleKind GetLifecycleForRule(uint nativeRule)
+        {
+            switch (nativeRule)
+            {
+                case 3:
+                case 4:
+                case 5:
+                case 6:
+                case 13:
+                    return BattleLifecycleKind.TimedRespawn;
+                case 7:
+                case 8:
+                    return BattleLifecycleKind.NativeDurability;
+                default:
+                    return BattleLifecycleKind.PermanentElimination;
+            }
+        }
+
+        public static uint GetDefaultDurationMsForRule(uint nativeRule) =>
+            (nativeRule == 4 || nativeRule == 5) ? 180_000u : 240_000u;
+
         public void Initialize(GameBeginData beginData, LoadedMapData sourceMap, ushort localPlayerId, bool usesFreeRule)
         {
             GameId = beginData.GameId;
             LocalPlayerId = localPlayerId;
             ArbitratorPlayerId = beginData.ArbitratorPlayerId;
             ElapsedMs = 0;
-            RoundDurationMs = beginData.GameTimeMs > 0 ? beginData.GameTimeMs : 240_000u;
             IsFinished = false;
             Map = sourceMap.Clone();
+            NativeRule = Map.NativeRule > 0 ? Map.NativeRule : 1u;
+            Lifecycle = GetLifecycleForRule(NativeRule);
+            RoundDurationMs = beginData.GameTimeMs > 0 ? beginData.GameTimeMs : GetDefaultDurationMsForRule(NativeRule);
             Actors.Clear();
             Bombs.Clear();
             Flames.Clear();
             Pickups.Clear();
+            ScheduledPickups.Clear();
             FieldObjects.Clear();
             Projectiles.Clear();
             Bosses.Clear();
@@ -660,6 +842,7 @@ namespace Qqtang.Core.Battle
             _lastMoveBroadcastMs = 0;
 
             GridCell[] spawns = ComputeNativeSpawns(beginData.SpawnSeed, usesFreeRule, Map.SpawnGroupA, Map.SpawnGroupB, beginData.Players);
+            byte initDurability = Lifecycle == BattleLifecycleKind.NativeDurability ? (byte)4 : (byte)0;
             for (int i = 0; i < beginData.Players.Count; i++)
             {
                 var p = beginData.Players[i];
@@ -673,6 +856,7 @@ namespace Qqtang.Core.Battle
                     RoleId = p.RoleId,
                     TeamId = p.TeamId,
                     IsLocal = p.PlayerId == localPlayerId,
+                    SpawnCell = spawn,
                     PosX = px,
                     PosY = py,
                     TargetPosX = px,
@@ -682,13 +866,33 @@ namespace Qqtang.Core.Battle
                     BombPower = profile.BombPower,
                     MaxBombPower = profile.MaxBombPower,
                     SpeedRate = profile.SpeedRate,
-                    MaxSpeedRate = profile.MaxSpeedRate
+                    MaxSpeedRate = profile.MaxSpeedRate,
+                    CanKickBomb = NativeRule == 2,
+                    NativeHitPoints = initDurability,
+                    MaxNativeHitPoints = initDurability
                 });
             }
 
             // Place hidden wall pickups deterministically from ItemSeed + GAME_BEGIN.NewItems (or Items fallback)
             var dropSource = beginData.NewItems.Count > 0 ? beginData.NewItems : beginData.Items;
             PlaceHiddenPickups(beginData.ItemSeed, Map.HiddenItemCells, dropSource);
+
+            // Schedule delayed supply drops (exact battleengine/scheduled_pickup.go: (rng.Next()%10 + 6) * 10000 ms)
+            if (beginData.NewItems.Count > 0 && beginData.Items.Count > 0)
+            {
+                var schedRng = new NativeMapRng(beginData.ItemSeed);
+                foreach (var item in beginData.Items)
+                {
+                    for (int n = 0; n < item.Quantity && ScheduledPickups.Count < 64; n++)
+                    {
+                        ScheduledPickups.Add(new ScheduledPickup
+                        {
+                            SceneId = item.ItemId,
+                            DueMs = (schedRng.Next() % 10u + 6u) * 10_000u
+                        });
+                    }
+                }
+            }
         }
 
         public void ConfigureOfflineScenario(OfflinePracticeMode mode)
@@ -920,6 +1124,8 @@ namespace Qqtang.Core.Battle
             if (ElapsedMs >= RoundStartClockMs)
             {
                 ExpireActorStatusesAndTransformations();
+                StepTimedRespawns();
+                StepScheduledPickups();
                 ResolveActionProjectiles();
                 ReleaseFieldObjectPassThrough();
 
@@ -1038,6 +1244,69 @@ namespace Qqtang.Core.Battle
                 byte[] body = rec.Marshal();
                 OutgoingPeerEvents.Add((ModeEventSchemas.NotifyRecoverAvatar, body));
                 OutgoingTcpEvents.Add((ModeEventSchemas.NotifyRecoverAvatar, body));
+            }
+        }
+
+        private void StepTimedRespawns()
+        {
+            if (Lifecycle != BattleLifecycleKind.TimedRespawn) return;
+            foreach (var actor in Actors)
+            {
+                if (actor.State != ActorLifeState.Dead || actor.RespawnAtMs == 0 || ElapsedMs < actor.RespawnAtMs) continue;
+                if (!IsOfflineSoloMode && LocalPlayerId != ArbitratorPlayerId && !actor.IsLocal) continue;
+                actor.State = ActorLifeState.Active;
+                actor.TrappedElapsedMs = 0;
+                actor.RespawnAtMs = 0;
+                actor.PosX = actor.SpawnCell.Col * CellSizePixels + CellSizePixels / 2;
+                actor.PosY = actor.SpawnCell.Row * CellSizePixels + CellSizePixels / 2;
+                actor.TargetPosX = actor.PosX;
+                actor.TargetPosY = actor.PosY;
+                actor.ShieldActiveUntilMs = ElapsedMs + 2000;
+                StepAudioCues |= BattleAudioCue.Respawn;
+                if (!IsOfflineSoloMode && LocalPlayerId == ArbitratorPlayerId)
+                {
+                    var rel = new PlayerReliveEventData
+                    {
+                        PlayerId = actor.PlayerId, ClientTime = ElapsedMs,
+                        Row = (byte)actor.SpawnCell.Row, Col = (byte)actor.SpawnCell.Col
+                    };
+                    byte[] body = rel.Marshal();
+                    OutgoingPeerEvents.Add((ExtendedGameEventSchemas.NotifyPlayerRelive, body));
+                    OutgoingTcpEvents.Add((ExtendedGameEventSchemas.NotifyPlayerRelive, body));
+                }
+            }
+        }
+
+        private void StepScheduledPickups()
+        {
+            if (ScheduledPickups.Count == 0) return;
+            if (!IsOfflineSoloMode && LocalPlayerId != ArbitratorPlayerId) return;
+            var dispatched = new List<DispatchedGameItem>();
+            for (int i = ScheduledPickups.Count - 1; i >= 0; i--)
+            {
+                if (ScheduledPickups[i].DueMs > ElapsedMs) continue;
+                uint sceneId = ScheduledPickups[i].SceneId;
+                ScheduledPickups.RemoveAt(i);
+                var open = new List<GridCell>();
+                for (int r = 0; r < Map.Height; r++)
+                    for (int c = 0; c < Map.Width; c++)
+                    {
+                        var gc = new GridCell(r, c);
+                        if (Map.GetCell(r, c).Collision == CellCollision.Open && !HasBombAt(gc) && !Pickups.Exists(p => !p.Consumed && p.Cell.Equals(gc)))
+                            open.Add(gc);
+                    }
+                if (open.Count == 0) continue;
+                _deathDropRng += 0x9E3779B97F4A7C15UL;
+                GridCell cell = open[(int)(_deathDropRng % (ulong)open.Count)];
+                Pickups.Add(new FieldPickup { SceneId = sceneId, Cell = cell, Hidden = false });
+                dispatched.Add(new DispatchedGameItem { ItemId = sceneId, ItemType = sceneId, Row = (byte)cell.Row, Col = (byte)cell.Col });
+            }
+            if (dispatched.Count > 0 && !IsOfflineSoloMode && LocalPlayerId == ArbitratorPlayerId)
+            {
+                var ev = new DispatchItemEventData { Time = ElapsedMs, Items = dispatched };
+                byte[] body = ev.Marshal();
+                OutgoingPeerEvents.Add((GameEventSchemas.NotifyDispatchItem, body));
+                OutgoingTcpEvents.Add((GameEventSchemas.NotifyDispatchItem, body));
             }
         }
 
@@ -1265,6 +1534,12 @@ namespace Qqtang.Core.Battle
         {
             bool flyOverStatic = TryGetTransformation(actor.TransformationSceneId, out var td) && td.TraverseStaticTerrain;
             GridCell oldCell = new GridCell(oldY / CellSizePixels, oldX / CellSizePixels);
+            GridCell newCell = new GridCell(newY / CellSizePixels, newX / CellSizePixels);
+            if (!flyOverStatic && dir != BattleDirection.None && !newCell.Equals(oldCell) && Map.InBounds(oldCell.Row, oldCell.Col))
+            {
+                if (!Map.GetCell(oldCell.Row, oldCell.Col).PlayerExitPassable(dir))
+                    return false;
+            }
             int minCol = (newX - ActorHalfSizePixels) / CellSizePixels;
             int maxCol = (newX + ActorHalfSizePixels) / CellSizePixels;
             int minRow = (newY - ActorHalfSizePixels) / CellSizePixels;
@@ -1469,13 +1744,41 @@ namespace Qqtang.Core.Battle
             BattleActor local = LocalActor;
             if (local == null) return;
 
-            // 1. Local flame hit check -> strips transformation OR Traps (0x0FA5)
+            // 1. Local flame hit check -> strips transformation OR decrements NativeDurability (Rules 7/8) OR Traps (0x0FA5)
             if (local.State == ActorLifeState.Active && !local.IsInvulnerable(ElapsedMs) && HasFlameAt(local.CurrentCell))
             {
                 if (local.IsTransformed)
                 {
                     EndTransformation(local, emitWire: true);
                     StepAudioCues |= BattleAudioCue.Damage;
+                }
+                else if (Lifecycle == BattleLifecycleKind.NativeDurability && local.NativeHitPoints > 0)
+                {
+                    local.NativeHitPoints--;
+                    local.ShieldActiveUntilMs = ElapsedMs + 1500;
+                    StepAudioCues |= BattleAudioCue.Damage;
+                    var harmed = new EntityHarmedEventData
+                    {
+                        ObjectId = local.PlayerId, Time = ElapsedMs,
+                        PosX = (ushort)Math.Max(0, local.PosX), PosY = (ushort)Math.Max(0, local.PosY),
+                        IsAvatar = false, LossHp = 0
+                    };
+                    byte[] hBody = harmed.Marshal();
+                    OutgoingPeerEvents.Add((ModeEventSchemas.PlayerBeHarmed, hBody));
+                    OutgoingTcpEvents.Add((ModeEventSchemas.PlayerBeHarmed, hBody));
+                    if (local.NativeHitPoints == 0)
+                    {
+                        local.State = ActorLifeState.Dead;
+                        StepAudioCues |= BattleAudioCue.Eliminated;
+                        var dieMsg = new PlayerDeathMessage
+                        {
+                            PlayerId = local.PlayerId, ClientTime = ElapsedMs,
+                            PosX = (ushort)Math.Max(0, local.PosX), PosY = (ushort)Math.Max(0, local.PosY)
+                        };
+                        byte[] dBody = dieMsg.Marshal();
+                        OutgoingPeerEvents.Add((GameEventSchemas.NotifyPlayerDie, dBody));
+                        OutgoingTcpEvents.Add((GameEventSchemas.NotifyPlayerDie, dBody));
+                    }
                 }
                 else
                 {
@@ -1549,6 +1852,7 @@ namespace Qqtang.Core.Battle
                         else
                         {
                             other.State = ActorLifeState.Dead;
+                            if (Lifecycle == BattleLifecycleKind.TimedRespawn) other.RespawnAtMs = ElapsedMs + 3000;
                             local.KillCount++;
                             StepAudioCues |= BattleAudioCue.Eliminated;
                             if (IsOfflineSoloMode) ScatterDeathDrops(other);
@@ -1566,6 +1870,7 @@ namespace Qqtang.Core.Battle
                 if (local.TrappedElapsedMs >= local.OxygenMs)
                 {
                     local.State = ActorLifeState.Dead;
+                    if (Lifecycle == BattleLifecycleKind.TimedRespawn) local.RespawnAtMs = ElapsedMs + 3000;
                     StepAudioCues |= BattleAudioCue.Eliminated;
                     var drops = ScatterDeathDrops(local);
                     var dieMsg = new PlayerDeathMessage
@@ -2054,6 +2359,11 @@ namespace Qqtang.Core.Battle
                         if (Map.InBounds(it.Row, it.Col))
                             Pickups.Add(new FieldPickup { SceneId = it.ItemId != 0 ? it.ItemId : it.ItemType, Cell = new GridCell(it.Row, it.Col), Hidden = false });
                     }
+                    foreach (var dl in disp.DelayedItems)
+                    {
+                        if (dl.ItemId != 0)
+                            ScheduledPickups.Add(new ScheduledPickup { SceneId = dl.ItemId, DueMs = dl.DispatchTime });
+                    }
                     break;
                 }
 
@@ -2125,6 +2435,19 @@ namespace Qqtang.Core.Battle
                     {
                         boss.Hp = Math.Max(0, boss.Hp - (h.LossHp > 0 ? h.LossHp : 500));
                         if (boss.Hp <= 0) boss.Alive = false;
+                        StepAudioCues |= BattleAudioCue.Damage;
+                    }
+                    else
+                    {
+                        var harmedActor = GetActor(h.ObjectId);
+                        if (harmedActor != null && harmedActor.State != ActorLifeState.Dead)
+                        {
+                            if (harmedActor.NativeHitPoints > 0) harmedActor.NativeHitPoints--;
+                            harmedActor.ShieldActiveUntilMs = ElapsedMs + 1500;
+                            StepAudioCues |= BattleAudioCue.Damage;
+                            if (Lifecycle == BattleLifecycleKind.NativeDurability && harmedActor.NativeHitPoints == 0)
+                                harmedActor.State = ActorLifeState.Dead;
+                        }
                     }
                     break;
                 }
@@ -2330,6 +2653,179 @@ namespace Qqtang.Core.Battle
                         ta.State = ActorLifeState.Trapped;
                         ta.TrappedElapsedMs = 0;
                     }
+                    break;
+                }
+
+                case ModeEventSchemas.RequestLaunchMachine:
+                {
+                    var ml = MachineLaunchEventData.Parse(body);
+                    StepAudioCues |= BattleAudioCue.Wave;
+                    break;
+                }
+
+                case ModeEventSchemas.NotifyMachineFree:
+                case ModeEventSchemas.NotifyMachineAngry:
+                case ModeEventSchemas.NotifyMachineGrace:
+                case ModeEventSchemas.NotifyMachineCool:
+                case ModeEventSchemas.NotifyMachineMove:
+                {
+                    var ms = MachineBombStateEventData.Parse(body);
+                    foreach (var bm in ms.Bombs)
+                    {
+                        var cell = new GridCell(bm.row, bm.col);
+                        if (Map.InBounds(cell.Row, cell.Col) && !HasBombAt(cell))
+                        {
+                            Bombs.Add(new ActiveBomb
+                            {
+                                BombId = _nextBombId++, OwnerId = ms.PlayerId, Cell = cell, Power = 2,
+                                PlacedAtMs = ms.Time, ExplodeAtMs = ElapsedMs + BombFuseMs, RemoteOwned = true
+                            });
+                        }
+                    }
+                    StepAudioCues |= BattleAudioCue.Wave;
+                    break;
+                }
+
+                case ModeEventSchemas.NotifyPushMapElement:
+                {
+                    var push = PushMapElementNotifyData.Parse(body);
+                    if (push.Element != null && push.Element.Length >= 2)
+                    {
+                        var src = new GridCell(push.Element[0], push.Element[1]);
+                        var dst = new GridCell(push.DestinationRow, push.DestinationCol);
+                        if (Map.InBounds(src.Row, src.Col) && Map.InBounds(dst.Row, dst.Col))
+                        {
+                            ApplyMapElementSlide(src, dst);
+                            StepAudioCues |= BattleAudioCue.WoodPush;
+                        }
+                    }
+                    break;
+                }
+
+                case ModeEventSchemas.NotifyMapElementStop:
+                {
+                    var stop = MapElementStopEventData.Parse(body);
+                    foreach (var bx in stop.Boxes)
+                    {
+                        var src = new GridCell(bx.Row, bx.Col);
+                        var dst = new GridCell(bx.StopRow, bx.StopCol);
+                        if (!src.Equals(dst) && Map.InBounds(src.Row, src.Col) && Map.InBounds(dst.Row, dst.Col))
+                            ApplyMapElementSlide(src, dst);
+                    }
+                    break;
+                }
+
+                case ModeEventSchemas.NotifyGenerateBox:
+                {
+                    var gen = GenerateBoxesEventData.Parse(body);
+                    foreach (var el in gen.Elements)
+                    {
+                        if (el == null || el.Length < 8) continue;
+                        int r = el[0], c = el[1];
+                        if (!Map.InBounds(r, c)) continue;
+                        int idx = r * Map.Width + c;
+                        var tile = Map.Cells[idx];
+                        uint elemId = QqTea.ReadUInt32BE(el, 4);
+                        tile.Collision = CellCollision.Breakable;
+                        tile.FlamePassable = false;
+                        tile.MapElementOccupied = true;
+                        tile.Pushable = true;
+                        tile.Durability = 1;
+                        tile.MapElementId = elemId != 0 ? elemId : 2002u;
+                        tile.VisualSceneElementId = (int)tile.MapElementId;
+                        Map.Cells[idx] = tile;
+                    }
+                    break;
+                }
+
+                case ModeEventSchemas.NotifyMapElementExploded:
+                {
+                    var exp = MapElementsExplodedEventData.Parse(body);
+                    foreach (var el in exp.Elements)
+                    {
+                        if (el == null || el.Length < 2) continue;
+                        int r = el[0], c = el[1];
+                        if (!Map.InBounds(r, c)) continue;
+                        int idx = r * Map.Width + c;
+                        var tile = Map.Cells[idx];
+                        tile.Collision = CellCollision.Open;
+                        tile.FlamePassable = true;
+                        tile.MapElementOccupied = false;
+                        tile.Pushable = false;
+                        tile.Durability = 0;
+                        tile.VisualSceneElementId = 0;
+                        Map.Cells[idx] = tile;
+                    }
+                    StepAudioCues |= BattleAudioCue.WoodBreak;
+                    break;
+                }
+
+                case ModeEventSchemas.NotifyPlayerKnocked:
+                {
+                    var kn = PlayerKnockedEventData.Parse(body);
+                    var ka = GetActor(kn.PlayerId);
+                    if (ka != null && ka.State != ActorLifeState.Dead)
+                    {
+                        ka.PosX = kn.PosX;
+                        ka.PosY = kn.PosY;
+                        if (ka.NativeHitPoints > 0) ka.NativeHitPoints--;
+                        ka.ShieldActiveUntilMs = ElapsedMs + 1500;
+                        StepAudioCues |= BattleAudioCue.Damage;
+                        if (Lifecycle == BattleLifecycleKind.NativeDurability && ka.NativeHitPoints == 0)
+                            ka.State = ActorLifeState.Dead;
+                    }
+                    break;
+                }
+
+                case ModeEventSchemas.NotifyFire:
+                {
+                    var fire = PlayerTimedStateEventData.Parse(body);
+                    int midR = Map.Height / 2, midC = Map.Width / 2;
+                    if ((fire.Value & 1) != 0) for (int c = 0; c < Map.Width; c++) AddFlame(new GridCell(midR, c), fire.PlayerId);
+                    if ((fire.Value & 2) != 0) for (int r = 0; r < Map.Height; r++) AddFlame(new GridCell(r, midC), fire.PlayerId);
+                    if ((fire.Value & 4) != 0) for (int c = 0; c < Map.Width; c++) AddFlame(new GridCell(Math.Max(0, midR - 2), c), fire.PlayerId);
+                    if ((fire.Value & 8) != 0) for (int c = 0; c < Map.Width; c++) AddFlame(new GridCell(Math.Min(Map.Height - 1, midR + 2), c), fire.PlayerId);
+                    StepAudioCues |= BattleAudioCue.Wave;
+                    break;
+                }
+
+                case ModeEventSchemas.NotifyCancelUseProp:
+                {
+                    var cp = CancelUsePropEventData.Parse(body);
+                    var ca = GetActor(cp.PlayerId);
+                    if (ca != null && ca.ActivePreparedPropId == cp.PropId) ca.ActivePreparedPropId = 0;
+                    break;
+                }
+
+                case ModeEventSchemas.NotifyPropTrigger:
+                {
+                    var pt = PropTriggerEventData.Parse(body);
+                    foreach (var aff in pt.AffectedPlayers)
+                    {
+                        var aa = GetActor(aff.playerId);
+                        if (aa != null && aa.State != ActorLifeState.Dead)
+                        {
+                            aa.PosX = (int)aff.posX;
+                            aa.PosY = (int)aff.posY;
+                            aa.TargetPosX = aa.PosX;
+                            aa.TargetPosY = aa.PosY;
+                            aa.Facing = FromNativeDirectionCode(aff.dir);
+                        }
+                    }
+                    StepAudioCues |= BattleAudioCue.Wave;
+                    break;
+                }
+
+                case ModeEventSchemas.NotifyWrestleSkill:
+                {
+                    var wr = WrestleActionEventData.Parse(body);
+                    var wa = GetActor(wr.PlayerId);
+                    if (wa != null && wa.State == ActorLifeState.Active)
+                    {
+                        wa.MovementStatus = MovementStatusKind.Fast;
+                        wa.MovementStatusExpiresAtMs = ElapsedMs + 2000;
+                    }
+                    StepAudioCues |= BattleAudioCue.Wave;
                     break;
                 }
             }

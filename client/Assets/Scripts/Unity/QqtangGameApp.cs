@@ -338,6 +338,8 @@ namespace Qqtang.UnityClient
                 if (Input.GetKeyDown(KeyCode.Alpha4)) TriggerBattleWorldItem(43); // Slow Glue
                 if (Input.GetKeyDown(KeyCode.Alpha5)) TriggerBattleProjectileItem(); // Dart (44) or Axe (46)
                 if (Input.GetKeyDown(KeyCode.Alpha6)) TriggerBattleWorldItem(64); // Remote Detonator
+                if (Input.GetKeyDown(KeyCode.F)) TriggerBattleModeSkill();        // Mode Skill / Prepared Prop
+                if (Input.GetKeyDown(KeyCode.C)) TriggerCancelPreparedProp();     // Cancel Prepared Prop
                 if (Input.GetKeyDown(KeyCode.E)) TriggerBattleEmotion(1);
             }
 
@@ -371,9 +373,23 @@ namespace Qqtang.UnityClient
                 }
             }
 
-            _arenaView.HasActivePet = !_isOfflineSolo && _store.Pets.Exists(p => p.IsActive);
+            var activePet = !_isOfflineSolo ? _store.Pets.Find(p => p.IsActive) : null;
+            _arenaView.HasActivePet = activePet != null;
+            _arenaView.ActivePetTypeId = activePet != null ? activePet.PetTypeId : 0u;
+            _arenaView.LocalBubbleStyleId = ResolveEquippedBubbleStyleId();
             _arenaView.SyncView(_sim);
             _battleView.UpdateHud(_sim, _activeBattleMapId);
+        }
+
+        private uint ResolveEquippedBubbleStyleId()
+        {
+            if (_isOfflineSolo) return 0u;
+            foreach (var it in _store.Inventory)
+            {
+                if (it.Status == 1 && it.Quantity > 0 && _catalogs.GetItemCategory(it.ItemId) == "bubble")
+                    return it.ItemId;
+            }
+            return 0u;
         }
 
         private void PlayBattleAudioCues(BattleAudioCue cues)
@@ -554,6 +570,40 @@ namespace Qqtang.UnityClient
             if (_sim?.LocalActor == null) return;
             uint actionId = _sim.LocalActor.AxeCount > 0 ? 46u : 44u;
             TriggerBattleWorldItem(actionId);
+        }
+
+        public void TriggerBattleModeSkill()
+        {
+            if (_sim == null) return;
+            uint preparedPropId = 0;
+            if (!_isOfflineSolo)
+            {
+                // Auto-pick first carried Adventure/Item-field prepared consumable (Revive card 20100 / Medkit 20050 / Stamina potion 20043/20044)
+                ushort[] candidates = { 20100, 20050, 20043, 20044 };
+                foreach (ushort cid in candidates)
+                {
+                    if (_store.OwnsItem(cid)) { preparedPropId = cid; break; }
+                }
+            }
+            if (_sim.TryTriggerModeSkill(preparedPropId))
+            {
+                _audio.PlaySfx("wave", 0.72f);
+                if (!_isOfflineSolo) FlushOutgoingBattleEvents();
+            }
+            else
+            {
+                ShowToast("当前模式无可用绝技或背包未携带战备消耗品");
+            }
+        }
+
+        public void TriggerCancelPreparedProp()
+        {
+            if (_sim == null) return;
+            if (_sim.TryCancelPreparedProp())
+            {
+                if (!_isOfflineSolo) FlushOutgoingBattleEvents();
+                ShowToast("已取消当前准备道具");
+            }
         }
 
         public async void RequestAdventureNextMap()
@@ -1067,6 +1117,21 @@ namespace Qqtang.UnityClient
                     ShowToast("家族宣言已更新");
                 }
                 else ShowToast($"更新宣言失败：{res.Reason}");
+            });
+        }
+
+        public async void RequestUpdateKinTitle(string title)
+        {
+            await RunSafeAsync(async () =>
+            {
+                var res = await _session.UpdateKinTitleAsync(_store.KinIndex, title);
+                if (res.Result == 0)
+                {
+                    var kb = await _session.FetchKinBaseAsync(_store.KinIndex);
+                    _store.ApplyKinBase(kb);
+                    ShowToast("家族称号已更新");
+                }
+                else ShowToast($"更新称号失败：{res.Reason}");
             });
         }
 

@@ -30,6 +30,7 @@ namespace Qqtang.Core.Tests
                 TestRule1SimulationMechanics();
                 TestAuthenticBattleItemsAndTransformations();
                 TestOfflineSoloAiAndBossMechanics();
+                TestPhase5NativeModesAndCodecs();
                 TestStaticCatalogs();
                 TestRealMapFileIfPresent();
 
@@ -354,18 +355,116 @@ namespace Qqtang.Core.Tests
             Pass("Offline Solo AI Bot + PVE Boss (0x138A/0x10F4) + Bun Objective (0x0FB7/0x0FB9)");
         }
 
+        private static void TestPhase5NativeModesAndCodecs()
+        {
+            // 1. Machine World (0x10EF / 0x10F0..0x10F3 / 0x115D) & Box (0x115E..0x1168 / 0x0FBE) & Prop Cancel/Trigger (0x10F5..0x10F7) & DispatchItem (0x0FAE)
+            var ml = new MachineLaunchEventData { FirstTeam = 1, RoleId = 2, PlayerId = 7, Time = 4500 };
+            var ml2 = MachineLaunchEventData.Parse(ml.Marshal());
+            Assert(ml2.PlayerId == 7 && ml2.RoleId == 2 && ml2.Time == 4500, "MachineLaunch round-trip failed");
+
+            var mb = new MachineBombStateEventData { PlayerId = 7, Time = 5000 };
+            mb.Bombs.Add((10u, 1, 4, 6));
+            var mb2 = MachineBombStateEventData.Parse(mb.Marshal());
+            Assert(mb2.Bombs.Count == 1 && mb2.Bombs[0].row == 4 && mb2.Bombs[0].col == 6, "MachineBombState round-trip failed");
+
+            var push = new PushMapElementNotifyData { PlayerId = 7, Direction = 0, Power = 2, DestinationRow = 3, DestinationCol = 5, Time = 6000, Element = new byte[] { 3, 4, 0, 0, 0, 0, 7, 0xD2 } };
+            var push2 = PushMapElementNotifyData.Parse(push.Marshal());
+            Assert(push2.DestinationRow == 3 && push2.DestinationCol == 5 && push2.Element[1] == 4, "PushMapElementNotify round-trip failed");
+
+            var cancel = new CancelUsePropEventData { PlayerId = 7, PropId = 20050, Time = 6100 };
+            var cancel2 = CancelUsePropEventData.Parse(cancel.Marshal());
+            Assert(cancel2.PropId == 20050, "CancelUseProp round-trip failed");
+
+            var trig = new PropTriggerEventData { PropGuid = 99, GameTime = 6200, UserId = 7, PosX = 100, PosY = 100, Dir = 1, TypeId = 20050 };
+            trig.AffectedPlayers.Add((8, 140, 140, 2));
+            var trig2 = PropTriggerEventData.Parse(trig.Marshal());
+            Assert(trig2.AffectedPlayers.Count == 1 && trig2.AffectedPlayers[0].playerId == 8 && trig2.TypeId == 20050, "PropTrigger round-trip failed");
+
+            var disp = new DispatchItemEventData { Time = 6300 };
+            disp.Items.Add(new DispatchedGameItem { ItemId = 24, Row = 2, Col = 3 });
+            disp.DelayedItems.Add(new DispatchedGameItem { ItemId = 109, DispatchTime = 70_000, Row = 4, Col = 5 });
+            var disp2 = DispatchItemEventData.Parse(disp.Marshal());
+            Assert(disp2.Items.Count == 1 && disp2.Items[0].ItemId == 24 && disp2.DelayedItems.Count == 1 && disp2.DelayedItems[0].DispatchTime == 70_000, "DispatchItemEventData round-trip failed");
+
+            // 2. Native Rule 7 (Machine World) -> 4-hit NativeDurability + MachineLaunch + MachineBombState
+            var mMap = MapDataLoader.BuildFallbackArena(701);
+            mMap.NativeRule = 7;
+            var begin7 = new GameBeginData { GameId = 507, MapId = 701, SpawnSeed = 11, ItemSeed = 22, ArbitratorPlayerId = 1 };
+            begin7.Players.Add(new PlayerGameInfoData { PlayerId = 1, RoleId = 1, TeamId = 1 });
+            begin7.Players.Add(new PlayerGameInfoData { PlayerId = 2, RoleId = 2, TeamId = 2 });
+            var sim7 = new Rule1BattleSimulation();
+            sim7.Initialize(begin7, mMap, 1, false);
+            Assert(sim7.Lifecycle == BattleLifecycleKind.NativeDurability && sim7.LocalActor.NativeHitPoints == 4, "Rule 7 should start with 4-hit NativeDurability");
+            sim7.Step(3000, BattleDirection.None, false);
+            Assert(sim7.TryTriggerModeSkill(), "Rule 7 mode skill should emit RequestLaunchMachine");
+            Assert(sim7.OutgoingTcpEvents.Any(e => e.schemaId == ModeEventSchemas.RequestLaunchMachine), "Missing 0x10EF RequestLaunchMachine");
+            sim7.ApplyRemoteMessage(2, ModeEventSchemas.NotifyMachineFree, mb.Marshal());
+            Assert(sim7.Bombs.Count == 1 && sim7.Bombs[0].Cell.Equals(new GridCell(4, 6)), "NotifyMachineFree did not materialize machine bomb");
+            sim7.ApplyRemoteMessage(2, ModeEventSchemas.PlayerBeHarmed, new EntityHarmedEventData { ObjectId = 1, Time = 3100, LossHp = 0 }.Marshal());
+            Assert(sim7.LocalActor.NativeHitPoints == 3 && sim7.LocalActor.State == ActorLifeState.Active, "Rule 7 durability hit should reduce HP 4->3 without killing");
+
+            // 3. Native Rule 2 (KickBomb) -> CanKickBomb on start + PlayerThrowBomb (0x1159)
+            var kMap = MapDataLoader.BuildFallbackArena(202);
+            kMap.NativeRule = 2;
+            var sim2 = new Rule1BattleSimulation();
+            sim2.Initialize(begin7, kMap, 1, false);
+            Assert(sim2.LocalActor.CanKickBomb, "Rule 2 should grant CanKickBomb from start");
+            sim2.Step(3000, BattleDirection.None, false);
+            sim2.LocalActor.PosX = 20; sim2.LocalActor.PosY = 20; // Place deterministically at (0,0)
+            sim2.Map.Cells[0 * sim2.Map.Width + 1].Collision = CellCollision.Open;
+            sim2.Map.Cells[0 * sim2.Map.Width + 2].Collision = CellCollision.Open;
+            sim2.Bombs.Add(new ActiveBomb { BombId = 99, OwnerId = 2, Cell = new GridCell(0, 1), Power = 2, PlacedAtMs = 3000, ExplodeAtMs = 6000 });
+            Assert(sim2.TryKickAdjacentBomb(BattleDirection.Right), "Rule 2 kick failed");
+            Assert(sim2.OutgoingTcpEvents.Any(e => e.schemaId == ModeEventSchemas.PlayerThrowBomb), "Rule 2 kick must emit 0x1159 PlayerThrowBomb");
+
+            // 4. Native Rule 4 (Wrestle) -> 180s duration + TimedRespawn + Delayed Scheduled Pickups + Directional Exit Block
+            var wMap = MapDataLoader.BuildFallbackArena(401);
+            wMap.NativeRule = 4;
+            var begin4 = new GameBeginData { GameId = 504, MapId = 401, SpawnSeed = 11, ItemSeed = 22, ArbitratorPlayerId = 1 };
+            begin4.Players.Add(new PlayerGameInfoData { PlayerId = 1, RoleId = 1, TeamId = 1 });
+            begin4.Players.Add(new PlayerGameInfoData { PlayerId = 2, RoleId = 2, TeamId = 2 });
+            begin4.NewItems.Add(new GameItemTypeData { ItemId = 1, Quantity = 1 });
+            begin4.Items.Add(new GameItemTypeData { ItemId = 24, Quantity = 1 });
+            var sim4 = new Rule1BattleSimulation { IsOfflineSoloMode = true };
+            sim4.Initialize(begin4, wMap, 1, false);
+            Assert(sim4.RoundDurationMs == 180_000u && sim4.Lifecycle == BattleLifecycleKind.TimedRespawn, "Rule 4 should be 180s TimedRespawn");
+            Assert(sim4.ScheduledPickups.Count == 1 && sim4.ScheduledPickups[0].DueMs >= 60_000u, "Delayed scheduled pickup not queued");
+            sim4.LocalActor.PosX = 20; sim4.LocalActor.PosY = 20; // (0,0)
+            sim4.Map.Cells[0].NativeGridAttr = 15 & ~1u; // Block Right exit from (0,0)
+            sim4.Map.Cells[0].NativeGridAttrSet = true;
+            sim4.Map.Cells[0].NativePlayerExitAttr = 15 & ~1u;
+            sim4.Map.Cells[0].NativePlayerExitAttrSet = true;
+            sim4.Step(3000, BattleDirection.None, false);
+            int startX = sim4.LocalActor.PosX;
+            for (int i = 0; i < 8; i++) sim4.Step(50, BattleDirection.Right, false);
+            Assert(sim4.LocalActor.CurrentCell.Col == 0 && sim4.LocalActor.PosX >= startX, "Directional exit attr should block moving right out of (0,0)");
+            sim4.LocalActor.State = ActorLifeState.Dead;
+            sim4.LocalActor.RespawnAtMs = sim4.ElapsedMs + 100;
+            sim4.Step(120, BattleDirection.None, false);
+            Assert(sim4.LocalActor.State == ActorLifeState.Active, "TimedRespawn did not revive dead actor");
+            Pass("Phase 5 Native Modes (Machine 0x10EF..0x115D, Box 0x115E..0x1168, Prop Cancel/Trigger, Rule 2 KickBomb, Rule 7 Durability, Rule 4 TimedRespawn, Directional Exit, Scheduled Supply)");
+        }
+
         private static void TestStaticCatalogs()
         {
             string repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
             string serverDir = Path.Combine(repoRoot, "server");
+            string localMapsDir = Path.Combine(repoRoot, "client", "Assets", "StreamingAssets", "LocalMaps");
             var catalogs = new StaticCatalogs();
-            catalogs.LoadFromDirectories(serverDir, @"C:\Users\luyua\Downloads\QQTang-Local\runtime\client-patched");
+            catalogs.LoadFromDirectories(localMapsDir, serverDir, @"C:\Users\luyua\Downloads\QQTang-Local\runtime\client-patched");
             Assert(catalogs.Maps.Count >= 300, $"Expected >=300 maps, got {catalogs.Maps.Count}");
             Assert(catalogs.ItemsById.Count >= 2000, $"Expected >=2000 items, got {catalogs.ItemsById.Count}");
             Assert(catalogs.CombineRecipes.Count >= 10, $"Expected >=10 combine recipes, got {catalogs.CombineRecipes.Count}");
             Assert(catalogs.PetsByTypeId.Count >= 10, $"Expected >=10 pet types, got {catalogs.PetsByTypeId.Count}");
             Assert(StaticCatalogs.GetRankTitle(1).Contains("QQ堂平民"), "Rank title mismatch");
-            Pass($"StaticCatalogs (maps={catalogs.Maps.Count}, items={catalogs.ItemsById.Count}, recipes={catalogs.CombineRecipes.Count}, pets={catalogs.PetsByTypeId.Count}, shop={catalogs.ShopCommodities.Count})");
+            string mapDescPath = Path.Combine(localMapsDir, "mapDesc.py");
+            if (File.Exists(mapDescPath))
+            {
+                var fileMap = MapDataLoader.LoadMapFilenamesFromMapDescPy(mapDescPath);
+                Assert(fileMap.Count >= 300, $"Expected mapDesc.py filename map >= 300, got {fileMap.Count}");
+                Assert(catalogs.AdventureMaps.Count >= 40, $"Expected >=40 PVE adventure maps, got {catalogs.AdventureMaps.Count}");
+            }
+            Pass($"StaticCatalogs (maps={catalogs.Maps.Count}, pve={catalogs.AdventureMaps.Count}, items={catalogs.ItemsById.Count}, recipes={catalogs.CombineRecipes.Count}, pets={catalogs.PetsByTypeId.Count}, shop={catalogs.ShopCommodities.Count})");
         }
 
         private static void TestRealMapFileIfPresent()
@@ -697,6 +796,9 @@ namespace Qqtang.Core.Tests
                 store1.ApplyServerPacket(new DecodedLocalPacket { Command = ExtendedGameCommands.PlayerItemAddNotify, Payload = Array.Empty<byte>() });
                 store1.UpsertInventoryItems(itemPush.Items);
                 Assert(store1.OwnsItem(294), "Purchased item 294 not reflected in ClientStateStore");
+                // Verify Inventory Cabinet toggle (Status=2 collected off-switch -> Status=0)
+                await c1.SetItemStatusAsync(294, 2);
+                await c1.SetItemStatusAsync(294, 0);
 
                 var eggRes = await c1.BreakEggAsync(9011, 9001);
                 Assert(eggRes.ResultId == 0 && eggRes.ShowItemId > 0, $"BreakEgg failed: res={eggRes.ResultId}");
@@ -738,6 +840,8 @@ namespace Qqtang.Core.Tests
                 Assert(kinMembers.Members.Count == 2, $"Expected 2 kin members after invite, got {kinMembers.Members.Count}");
                 var declRes = await c1.SetKinDeclarationAsync(kinCreate.KinIndex, "NewDecl");
                 Assert(declRes.Result == 0, $"SetKinDeclaration failed: {declRes.Result}");
+                var titleRes = await c1.UpdateKinTitleAsync(kinCreate.KinIndex, "ImmortalHall");
+                Assert(titleRes.Result == 0, $"UpdateKinTitle failed: {titleRes.Result}");
                 var notifRes = await c1.SetKinNotificationAsync(kinCreate.KinIndex, "WelcomeAll");
                 Assert(notifRes.Result == 0, $"SetKinNotification failed: {notifRes.Result}");
                 var badgeRes = await c1.SetKinBadgeAsync(kinCreate.KinIndex, 7);
