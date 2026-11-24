@@ -40,17 +40,73 @@ namespace Qqtang.UnityClient
             return (d, o, p);
         }
 
-        public Sprite GetLogoSprite()
+        public Sprite GetLogoSprite() => GetOptionalUiSprite("ui/logo");
+        public Sprite GetResultCrestSprite(string kind) => GetOptionalUiSprite($"ui/{kind}"); // victory | defeat | draw
+
+        private Sprite GetOptionalUiSprite(string key)
         {
-            string key = "ui/logo";
             if (_sprites.TryGetValue(key, out var cached)) return cached;
-            string daoistPath = Path.Combine(_cacheRoot, "daoist", "ui", "logo.png");
+            string daoistPath = Path.Combine(_cacheRoot, "daoist", key.Replace('/', Path.DirectorySeparatorChar) + ".png");
             if (!TryLoadPng(daoistPath, out var tex)) return null;
             _textures[key] = tex;
             _resolvedSources[key] = "daoist";
             Sprite sp = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f), 100f);
             _sprites[key] = sp;
             return sp;
+        }
+
+        public Sprite GetRolePortraitSprite(byte roleId, Color fallbackTint)
+        {
+            string key = $"portraits/role_{roleId}";
+            if (HasCachedAsset(key))
+                return GetSprite(key, fallbackTint, circleMask: false);
+            return GetCharacterSprite(roleId, "S", fallbackTint);
+        }
+
+        public Sprite GetTrappedCharacterSprite(byte roleId, Color fallbackTint)
+        {
+            int slot = Math.Abs((roleId - 1) % 4);
+            string key = $"characters/trapped_{slot}";
+            if (HasCachedAsset(key))
+                return GetSprite(key, fallbackTint, circleMask: true);
+            return GetCharacterSprite(roleId, "S", fallbackTint);
+        }
+
+        public Sprite GetTransformationSprite(ushort avatarRoleId, Color fallbackTint)
+        {
+            string key = $"transforms/avatar_{avatarRoleId}";
+            if (HasCachedAsset(key))
+                return GetSprite(key, fallbackTint, circleMask: true);
+            return null;
+        }
+
+        public Sprite GetAnimatedBubbleSprite(uint bubbleStyleId, int frameIndex)
+        {
+            if (bubbleStyleId > 0)
+            {
+                string styleKey = $"effects/bubble_{bubbleStyleId}";
+                if (HasCachedAsset(styleKey))
+                    return GetSprite(styleKey, new Color(0.18f, 0.68f, 1f), circleMask: true);
+            }
+            string frameKey = $"effects/bubble_f{Math.Abs(frameIndex) % 3}";
+            if (HasCachedAsset(frameKey))
+                return GetSprite(frameKey, new Color(0.18f, 0.68f, 1f), circleMask: true);
+            return GetSprite("effects/bubble", new Color(0.18f, 0.68f, 1f), circleMask: true);
+        }
+
+        public Sprite GetAnimatedFlameSprite(int frameIndex)
+        {
+            string frameKey = $"effects/flame_f{Math.Abs(frameIndex) % 4}";
+            if (HasCachedAsset(frameKey))
+                return GetSprite(frameKey, new Color(1f, 0.55f, 0.15f), circleMask: true);
+            return GetSprite("effects/flame", new Color(1f, 0.55f, 0.15f), circleMask: true);
+        }
+
+        public Sprite GetMapThumbSprite(ushort mapId)
+        {
+            string key = $"maps/thumb_{mapId}";
+            if (!HasCachedAsset(key)) return null;
+            return GetSprite(key, new Color(0.22f, 0.30f, 0.36f), circleMask: false);
         }
 
         public Sprite GetItemIconSprite(ushort itemId)

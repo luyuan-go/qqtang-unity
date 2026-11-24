@@ -307,9 +307,10 @@ namespace Qqtang.UnityClient.UI
                 UiFactory.CreateButton(row, p.IsActive ? "休息" : "出战",
                     () => _ctx.App.RequestHandlePet(p.IsActive ? PetEventId.Deactivate : PetEventId.Activate, pid),
                     UiFactory.AccentCeladon, fontSize: 12, width: 54f, height: 28f);
-                UiFactory.CreateButton(row, "喂食", () => _ctx.App.RequestHandlePet(PetEventId.Feed, pid, _petParamInput.text.Trim()), UiFactory.AccentMuted, fontSize: 12, width: 52f, height: 28f);
-                UiFactory.CreateButton(row, "改名", () => _ctx.App.RequestHandlePet(PetEventId.Rename, pid, _petParamInput.text.Trim()), UiFactory.AccentMuted, fontSize: 12, width: 52f, height: 28f);
-                UiFactory.CreateButton(row, "放生", () => _ctx.App.RequestHandlePet(PetEventId.Release, pid), UiFactory.AccentDanger, fontSize: 12, width: 52f, height: 28f);
+                UiFactory.CreateButton(row, "喂食", () => _ctx.App.RequestHandlePet(PetEventId.Feed, pid, _petParamInput.text.Trim()), UiFactory.AccentMuted, fontSize: 12, width: 48f, height: 28f);
+                UiFactory.CreateButton(row, "学技", () => _ctx.App.RequestHandlePet(PetEventId.LearnSkill, pid, _petParamInput.text.Trim()), UiFactory.AccentGold, UiFactory.TextInk, fontSize: 12, width: 48f, height: 28f);
+                UiFactory.CreateButton(row, "改名", () => _ctx.App.RequestHandlePet(PetEventId.Rename, pid, _petParamInput.text.Trim()), UiFactory.AccentMuted, fontSize: 12, width: 48f, height: 28f);
+                UiFactory.CreateButton(row, "放生", () => _ctx.App.RequestHandlePet(PetEventId.Release, pid), UiFactory.AccentDanger, fontSize: 12, width: 48f, height: 28f);
             }
         }
 

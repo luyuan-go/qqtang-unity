@@ -86,8 +86,26 @@ namespace Qqtang.UnityClient
 
             LoadCatalogsAndMaps();
             BuildUi();
+            LoadSavedPreferences();
             BindStoreEvents();
             SetScreen(ClientScreenState.Login);
+        }
+
+        private void LoadSavedPreferences()
+        {
+            string host = PlayerPrefs.GetString("qqt_host", "127.0.0.1");
+            int port = PlayerPrefs.GetInt("qqt_port", 18000);
+            uint uin = (uint)Mathf.Max(0, PlayerPrefs.GetInt("qqt_uin", 1000001));
+            byte role = (byte)Mathf.Clamp(PlayerPrefs.GetInt("qqt_role", 1), 1, 4);
+            _loginView.ApplySavedDefaults(host, port, uin, role);
+
+            float master = PlayerPrefs.GetFloat("qqt_master", 0.85f);
+            float bgm = PlayerPrefs.GetFloat("qqt_bgm", 0.38f);
+            float sfx = PlayerPrefs.GetFloat("qqt_sfx", 0.72f);
+            bool muted = PlayerPrefs.GetInt("qqt_muted", 0) != 0;
+            float zoom = PlayerPrefs.GetFloat("qqt_zoom", 1.0f);
+            _lobbyView.ApplySavedSettings(master, bgm, sfx, muted, zoom);
+            ApplySettings(master, bgm, sfx, muted, zoom);
         }
 
         private void OnDestroy()
@@ -263,6 +281,17 @@ namespace Qqtang.UnityClient
                         RequestRefreshLobby();
                     }
                 }
+            }
+
+            // Detect unexpected server disconnect in online screens -> cleanly return to Login
+            if (!_isOfflineSolo && _screen != ClientScreenState.Login && !_session.IsConnected)
+            {
+                _store.ResetAll();
+                _sim = null;
+                SetScreen(ClientScreenState.Login);
+                _loginView.SetStatus("与服务端连接已断开，请重新登录。");
+                ShowToast("与服务端连接已断开");
+                return;
             }
 
             // Detect kicked-out transition back to Lobby
@@ -511,8 +540,17 @@ namespace Qqtang.UnityClient
 
             _arenaView.BuildArena(_sim);
             SetScreen(ClientScreenState.Battle);
-            string modeName = mode == OfflinePracticeMode.BossRaid ? "单人 BOSS 挑战"
-                : (mode == OfflinePracticeMode.BunCapture ? "抢包山" : (mode == OfflinePracticeMode.SculptureDefense ? "雕塑攻防" : $"1v{bots} 演武"));
+            string modeName;
+            switch (mode)
+            {
+                case OfflinePracticeMode.BossRaid: modeName = "单人 BOSS 挑战"; break;
+                case OfflinePracticeMode.BunCapture: modeName = "抢包山"; break;
+                case OfflinePracticeMode.SculptureDefense: modeName = "雕塑攻防"; break;
+                case OfflinePracticeMode.KickBomb: modeName = "踢泡大战"; break;
+                case OfflinePracticeMode.MachineDodge: modeName = "机械世界"; break;
+                case OfflinePracticeMode.BoxPush: modeName = "推箱大战"; break;
+                default: modeName = $"1v{bots} 演武"; break;
+            }
             ShowToast($"离线{modeName}开始（地图 {_catalogs.GetMapName(mapId)}），无需启动服务端！");
         }
 
@@ -524,6 +562,12 @@ namespace Qqtang.UnityClient
             _audio.Muted = muted;
             _audio.ApplyVolumeSettings();
             _arenaView.CameraZoom = zoom;
+            PlayerPrefs.SetFloat("qqt_master", master);
+            PlayerPrefs.SetFloat("qqt_bgm", bgm);
+            PlayerPrefs.SetFloat("qqt_sfx", sfx);
+            PlayerPrefs.SetInt("qqt_muted", muted ? 1 : 0);
+            PlayerPrefs.SetFloat("qqt_zoom", zoom);
+            PlayerPrefs.Save();
         }
 
         private LoadedMapData LoadBattleMap(uint mapId)
@@ -611,7 +655,9 @@ namespace Qqtang.UnityClient
             await RunSafeAsync(async () =>
             {
                 if (_sim == null || !_store.InRoom) return;
-                uint continueId = _store.CurrentGameBegin != null ? (uint)Math.Max(0, _store.CurrentGameBegin.ContinueId) : 0u;
+                uint continueId = _store.CurrentGameBegin != null
+                    ? unchecked((uint)_store.CurrentGameBegin.ContinueId)
+                    : 0xFFFFFFFFu;
                 await _session.SendAdventureNextMapAsync(_store.RoomId, continueId, 0, _sim.ElapsedMs);
                 ShowToast("已踏入探险传送门，等待服务端载入下一关...");
             });
@@ -645,6 +691,11 @@ namespace Qqtang.UnityClient
             try
             {
                 var login = await _session.ConnectAndLoginAsync(host, port, uin, password, roleId);
+                PlayerPrefs.SetString("qqt_host", host);
+                PlayerPrefs.SetInt("qqt_port", port);
+                PlayerPrefs.SetInt("qqt_uin", unchecked((int)uin));
+                PlayerPrefs.SetInt("qqt_role", roleId);
+                PlayerPrefs.Save();
                 _store.ApplyLogin(login, uin, _session.Nickname, _session.Gender);
                 _loginView.SetStatus("登录成功！", busy: false);
                 SetScreen(ClientScreenState.MainShell);

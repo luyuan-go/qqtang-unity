@@ -450,7 +450,17 @@ namespace Qqtang.Core.Protocol
             ushort declared = r.ReadUInt16();
             if (declared != r.Remaining)
                 throw new InvalidOperationException($"GAME_BEGIN_DATA declared {declared} != remaining {r.Remaining}.");
+            return ParseCore(ref r);
+        }
 
+        public static GameBeginData Parse(byte[] payload)
+        {
+            var r = new BigEndianReader(payload);
+            return ParseCore(ref r);
+        }
+
+        private static GameBeginData ParseCore(ref BigEndianReader r)
+        {
             var data = new GameBeginData
             {
                 GameId = r.ReadUInt32(),

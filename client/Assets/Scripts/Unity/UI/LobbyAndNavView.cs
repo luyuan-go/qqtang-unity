@@ -330,6 +330,15 @@ namespace Qqtang.UnityClient.UI
             _settingsModal.gameObject.SetActive(true);
         }
 
+        public void ApplySavedSettings(float master, float bgm, float sfx, bool muted, float zoom)
+        {
+            if (_masterSlider != null) _masterSlider.SetValueWithoutNotify(master);
+            if (_bgmSlider != null) _bgmSlider.SetValueWithoutNotify(bgm);
+            if (_sfxSlider != null) _sfxSlider.SetValueWithoutNotify(sfx);
+            if (_zoomSlider != null) _zoomSlider.SetValueWithoutNotify(zoom);
+            if (_muteToggle != null) _muteToggle.SetIsOnWithoutNotify(muted);
+        }
+
         private void PushSettings()
         {
             if (_masterSlider == null || _bgmSlider == null || _sfxSlider == null || _zoomSlider == null || _muteToggle == null) return;

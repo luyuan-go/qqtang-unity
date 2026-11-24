@@ -38,6 +38,7 @@ namespace Qqtang.UnityClient.UI
         private readonly RectTransform _treasureContent;
 
         private readonly Text _settlementTitle;
+        private readonly Image _settlementCrestImage;
         private readonly Text _settlementReturnLabel;
         private readonly RectTransform _scoreboardContent;
 
@@ -98,20 +99,20 @@ namespace Qqtang.UnityClient.UI
             botBar.sizeDelta = new Vector2(0f, 54f);
             UiFactory.AddHLayout(botBar.gameObject, 6f, 12, 6);
 
-            _localStatsText = UiFactory.CreateText(botBar, "泡:2 威:2 速:4", 13, UiFactory.AccentGold, FontStyle.Bold);
-            UiFactory.SetLayout(_localStatsText.gameObject, prefW: 250f, prefH: 38f);
+            _localStatsText = UiFactory.CreateText(botBar, "泡:2 威:2 速:4", 12, UiFactory.AccentGold, FontStyle.Bold);
+            UiFactory.SetLayout(_localStatsText.gameObject, prefW: 210f, prefH: 38f);
 
             _hotbarText = UiFactory.CreateText(botBar, "", 12, UiFactory.TextLight);
             UiFactory.SetLayout(_hotbarText.gameObject, flexW: 1f, prefH: 38f);
 
-            UiFactory.CreateButton(botBar, "针(1)", () => _ctx.App.TriggerBattleWorldItem(63), UiFactory.AccentCeladon, fontSize: 11, width: 48f, height: 30f);
-            UiFactory.CreateButton(botBar, "陷(2)", () => _ctx.App.TriggerBattleWorldItem(41), UiFactory.AccentVermilion, fontSize: 11, width: 48f, height: 30f);
-            UiFactory.CreateButton(botBar, "蕉(3)", () => _ctx.App.TriggerBattleWorldItem(42), UiFactory.AccentGold, UiFactory.TextInk, fontSize: 11, width: 48f, height: 30f);
-            UiFactory.CreateButton(botBar, "胶(4)", () => _ctx.App.TriggerBattleWorldItem(43), UiFactory.AccentCeladon, fontSize: 11, width: 48f, height: 30f);
-            UiFactory.CreateButton(botBar, "镖(5)", () => _ctx.App.TriggerBattleProjectileItem(), UiFactory.AccentMuted, fontSize: 11, width: 48f, height: 30f);
-            UiFactory.CreateButton(botBar, "遥(6)", () => _ctx.App.TriggerBattleWorldItem(64), UiFactory.AccentMuted, fontSize: 11, width: 48f, height: 30f);
-            UiFactory.CreateButton(botBar, "绝技(F)", () => _ctx.App.TriggerBattleModeSkill(), UiFactory.AccentVermilion, fontSize: 11, width: 58f, height: 30f);
-            UiFactory.CreateButton(botBar, "表(E)", () => _ctx.App.TriggerBattleEmotion(1), UiFactory.AccentMuted, fontSize: 11, width: 48f, height: 30f);
+            UiFactory.CreateButton(botBar, "针(1)", () => _ctx.App.TriggerBattleWorldItem(63), UiFactory.AccentCeladon, fontSize: 11, width: 44f, height: 30f);
+            UiFactory.CreateButton(botBar, "陷(2)", () => _ctx.App.TriggerBattleWorldItem(41), UiFactory.AccentVermilion, fontSize: 11, width: 44f, height: 30f);
+            UiFactory.CreateButton(botBar, "蕉(3)", () => _ctx.App.TriggerBattleWorldItem(42), UiFactory.AccentGold, UiFactory.TextInk, fontSize: 11, width: 44f, height: 30f);
+            UiFactory.CreateButton(botBar, "胶(4)", () => _ctx.App.TriggerBattleWorldItem(43), UiFactory.AccentCeladon, fontSize: 11, width: 44f, height: 30f);
+            UiFactory.CreateButton(botBar, "镖(5)", () => _ctx.App.TriggerBattleProjectileItem(), UiFactory.AccentMuted, fontSize: 11, width: 44f, height: 30f);
+            UiFactory.CreateButton(botBar, "遥(6)", () => _ctx.App.TriggerBattleWorldItem(64), UiFactory.AccentMuted, fontSize: 11, width: 44f, height: 30f);
+            UiFactory.CreateButton(botBar, "绝技(F)", () => _ctx.App.TriggerBattleModeSkill(), UiFactory.AccentVermilion, fontSize: 11, width: 56f, height: 30f);
+            UiFactory.CreateButton(botBar, "表(E)", () => _ctx.App.TriggerBattleEmotion(1), UiFactory.AccentMuted, fontSize: 11, width: 44f, height: 30f);
 
             // In-battle Mini Chat (bottom-left above bottom bar)
             var miniChatBox = UiFactory.CreateEmpty(HudRoot, "BattleMiniChat");
@@ -158,8 +159,15 @@ namespace Qqtang.UnityClient.UI
             sCard.sizeDelta = new Vector2(620f, 430f);
             UiFactory.AddVLayout(sCard.gameObject, 12f, 24, 20);
 
-            _settlementTitle = UiFactory.CreateText(sCard, "对 局 结 算", 30, UiFactory.AccentGold, TextAnchor.MiddleCenter, FontStyle.Bold);
-            UiFactory.SetLayout(_settlementTitle.gameObject, prefH: 44f);
+            var crestGo = new GameObject("ResultCrest", typeof(RectTransform), typeof(Image));
+            crestGo.transform.SetParent(sCard, false);
+            _settlementCrestImage = crestGo.GetComponent<Image>();
+            _settlementCrestImage.preserveAspect = true;
+            UiFactory.SetLayout(crestGo, prefH: 76f);
+            crestGo.SetActive(false);
+
+            _settlementTitle = UiFactory.CreateText(sCard, "对 局 结 算", 28, UiFactory.AccentGold, TextAnchor.MiddleCenter, FontStyle.Bold);
+            UiFactory.SetLayout(_settlementTitle.gameObject, prefH: 38f);
 
             var sbScroll = UiFactory.CreateScrollView(sCard, "Scoreboard", out _scoreboardContent, spacing: 6f);
             UiFactory.SetLayout(sbScroll.gameObject, flexW: 1f, flexH: 1f);
@@ -383,10 +391,15 @@ namespace Qqtang.UnityClient.UI
                     : (myRes.Result == GameResultCode.Draw ? "平 分 秋 色" : "再 接 再 厉");
                 _settlementTitle.color = myRes.Result == GameResultCode.Win ? UiFactory.AccentGold
                     : (myRes.Result == GameResultCode.Draw ? UiFactory.TextLight : UiFactory.AccentVermilion);
+                string crestKey = myRes.Result == GameResultCode.Win ? "victory" : (myRes.Result == GameResultCode.Draw ? "draw" : "defeat");
+                Sprite crest = _ctx.Art.GetResultCrestSprite(crestKey);
+                _settlementCrestImage.sprite = crest;
+                _settlementCrestImage.gameObject.SetActive(crest != null);
             }
             else
             {
                 _settlementTitle.text = "对 局 结 算";
+                _settlementCrestImage.gameObject.SetActive(false);
             }
 
             if (over != null)

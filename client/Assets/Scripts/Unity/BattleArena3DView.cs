@@ -57,7 +57,10 @@ namespace Qqtang.UnityClient
             public GameObject EmoteBadge;
             public GameObject BunHalo;
             public GameObject TeamRing;
+            public TextMesh Nameplate;
             public BattleDirection LastDir = BattleDirection.None;
+            public ushort LastAvatarRoleId;
+            public bool LastTrapped;
             public byte RoleId;
         }
 
@@ -272,17 +275,29 @@ namespace Qqtang.UnityClient
             emote.AddComponent<BillboardSprite>();
             emote.SetActive(false);
 
-            // Bun carrier halo (for Capture-the-Bun objective maps)
-            var bun = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-            bun.name = "BunHalo";
+            // Bun carrier halo (Daoist bun.png billboard)
+            var bun = new GameObject("BunHalo");
             bun.transform.SetParent(root.transform, false);
             bun.transform.localPosition = new Vector3(0f, 1.38f, 0f);
-            bun.transform.localScale = new Vector3(0.45f, 0.38f, 0.45f);
-            Destroy(bun.GetComponent<Collider>());
-            var bunMat = new Material(Shader.Find("Standard") ?? Shader.Find("Sprites/Default"));
-            bunMat.color = new Color(0.98f, 0.86f, 0.45f, 1f);
-            bun.GetComponent<MeshRenderer>().sharedMaterial = bunMat;
+            bun.transform.localScale = new Vector3(0.58f, 0.58f, 0.58f);
+            var bunSr = bun.AddComponent<SpriteRenderer>();
+            bunSr.sprite = _art.GetSprite("effects/bun", new Color(0.98f, 0.86f, 0.45f, 1f), circleMask: true);
+            bunSr.sortingOrder = 18;
+            bun.AddComponent<BillboardSprite>();
             bun.SetActive(false);
+
+            // Overhead floating nameplate & durability status (3D Billboard TextMesh)
+            var npObj = new GameObject("Nameplate");
+            npObj.transform.SetParent(root.transform, false);
+            npObj.transform.localPosition = new Vector3(0f, 1.32f, 0f);
+            npObj.transform.localScale = Vector3.one * 0.065f;
+            var tm = npObj.AddComponent<TextMesh>();
+            tm.text = actor.IsLocal ? $"★P{actor.PlayerId}" : $"P{actor.PlayerId}";
+            tm.fontSize = 36;
+            tm.anchor = TextAnchor.MiddleCenter;
+            tm.alignment = TextAlignment.Center;
+            tm.color = actor.IsLocal ? new Color(1f, 0.92f, 0.45f) : Color.Lerp(teamColor, Color.white, 0.35f);
+            npObj.AddComponent<BillboardSprite>();
 
             return new ActorVisual
             {
@@ -294,6 +309,7 @@ namespace Qqtang.UnityClient
                 EmoteBadge = emote,
                 BunHalo = bun,
                 TeamRing = ring,
+                Nameplate = tm,
                 RoleId = actor.RoleId
             };
         }
@@ -436,10 +452,24 @@ namespace Qqtang.UnityClient
                     else vis.Body.color = Color.white;
                 }
 
-                if (vis.LastDir != actor.Facing)
+                bool isTrapped = actor.State == ActorLifeState.Trapped;
+                if (vis.LastDir != actor.Facing || vis.LastAvatarRoleId != actor.AvatarRoleId || vis.LastTrapped != isTrapped)
                 {
                     vis.LastDir = actor.Facing;
-                    vis.Body.sprite = _art.GetCharacterSprite(vis.RoleId, DirectionSuffix(actor.Facing), TeamColor(actor.TeamId));
+                    vis.LastAvatarRoleId = actor.AvatarRoleId;
+                    vis.LastTrapped = isTrapped;
+                    Sprite nextSprite = null;
+                    if (isTrapped)
+                        nextSprite = _art.GetTrappedCharacterSprite(vis.RoleId, TeamColor(actor.TeamId));
+                    else if (actor.AvatarRoleId != 0)
+                        nextSprite = _art.GetTransformationSprite(actor.AvatarRoleId, TeamColor(actor.TeamId));
+                    vis.Body.sprite = nextSprite ?? _art.GetCharacterSprite(vis.RoleId, DirectionSuffix(actor.Facing), TeamColor(actor.TeamId));
+                }
+                if (vis.Nameplate != null)
+                {
+                    string hpStr = actor.MaxNativeHitPoints > 0 ? $" [{actor.NativeHitPoints}/{actor.MaxNativeHitPoints}]" : string.Empty;
+                    string tag = actor.IsLocal ? $"★P{actor.PlayerId}{hpStr}" : $"P{actor.PlayerId}{hpStr}";
+                    if (vis.Nameplate.text != tag) vis.Nameplate.text = tag;
                 }
             }
 
@@ -472,7 +502,8 @@ namespace Qqtang.UnityClient
                 _localPetVisual.SetActive(false);
             }
 
-            // 3. Sync bombs (applies equipped bubble skin sprite for local bombs & passive effect tint)
+            // 3. Sync bombs (multi-frame animated Daoist bubble + equipped bubble skin + passive effect glow)
+            int bubbleFrame = Mathf.FloorToInt(Time.time * 6f);
             EnsurePool(_pooledBombs, sim.Bombs.Count, "Bomb", () => CreateBillboardEntity("Bomb", "effects/bubble", new Color(0.18f, 0.68f, 1f), 0.95f, 5));
             for (int i = 0; i < _pooledBombs.Count; i++)
             {
@@ -487,7 +518,7 @@ namespace Qqtang.UnityClient
                     var bsr = _pooledBombs[i].GetComponent<SpriteRenderer>();
                     if (bsr != null)
                     {
-                        bsr.sprite = b.OwnerId == sim.LocalPlayerId ? _art.GetBubbleSprite(LocalBubbleStyleId) : _art.GetBubbleSprite(0);
+                        bsr.sprite = _art.GetAnimatedBubbleSprite(b.OwnerId == sim.LocalPlayerId ? LocalBubbleStyleId : 0u, bubbleFrame + (int)(b.BombId % 3));
                         var owner = sim.GetActor(b.OwnerId);
                         bool hasPassive = owner != null && owner.PassiveEffects != Qqtang.Core.Protocol.PassiveFunctionEffectMask.None;
                         bsr.color = hasPassive ? new Color(1f, 0.92f, 0.55f, 1f) : Color.white;
@@ -495,7 +526,8 @@ namespace Qqtang.UnityClient
                 }
             }
 
-            // 4. Sync flames
+            // 4. Sync flames (multi-frame animated Daoist flame10)
+            int flameFrame = Mathf.FloorToInt(Time.time * 12f);
             EnsurePool(_pooledFlames, sim.Flames.Count, "Flame", () => CreateBillboardEntity("Flame", "effects/flame", new Color(1f, 0.55f, 0.15f), 1.05f, 8));
             for (int i = 0; i < _pooledFlames.Count; i++)
             {
@@ -505,6 +537,8 @@ namespace Qqtang.UnityClient
                 {
                     var f = sim.Flames[i];
                     _pooledFlames[i].transform.position = CellToWorld(f.Cell.Row, f.Cell.Col, 0.15f);
+                    var fsr = _pooledFlames[i].GetComponent<SpriteRenderer>();
+                    if (fsr != null) fsr.sprite = _art.GetAnimatedFlameSprite(flameFrame + i);
                 }
             }
 
@@ -592,23 +626,17 @@ namespace Qqtang.UnityClient
                     ? new Color(0.95f, 0.28f, 0.18f, 1f) : new Color(0.88f, 0.94f, 1f, 1f);
             }
 
-            // 9. Offline Bun Objective center orb & Tank/Sculpture Base pillars
-            bool showBun = sim.IsOfflineSoloMode && sim.OfflineMode == OfflinePracticeMode.BunCapture && sim.BunCarrierPlayerId == 0;
+            // 9. Bun Objective billboard sprite (both Offline BunCapture and Online Rule 3) & Tank/Sculpture Base pillars
+            bool showBun = (sim.NativeRule == 3 || (sim.IsOfflineSoloMode && sim.OfflineMode == OfflinePracticeMode.BunCapture)) && sim.BunCarrierPlayerId == 0;
             if (showBun)
             {
                 if (_offlineBunOrb == null)
                 {
-                    _offlineBunOrb = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-                    _offlineBunOrb.name = "OfflineBunOrb";
-                    _offlineBunOrb.transform.SetParent(_dynamicRoot, false);
-                    _offlineBunOrb.transform.localScale = new Vector3(0.55f, 0.42f, 0.55f);
-                    Destroy(_offlineBunOrb.GetComponent<Collider>());
-                    var bm = new Material(Shader.Find("Sprites/Default"));
-                    bm.color = new Color(1f, 0.88f, 0.36f, 0.96f);
-                    _offlineBunOrb.GetComponent<MeshRenderer>().sharedMaterial = bm;
+                    _offlineBunOrb = CreateBillboardEntity("ObjectiveBun", "effects/bun", new Color(1f, 0.88f, 0.36f, 0.98f), 0.88f, 9);
                 }
                 _offlineBunOrb.SetActive(true);
-                _offlineBunOrb.transform.position = CellToWorld(sim.OfflineBunCell.Row, sim.OfflineBunCell.Col, 0.35f + 0.08f * Mathf.Sin(Time.time * 4f));
+                GridCell bunCell = sim.Map.ObjectiveCells.Count > 0 && !sim.IsOfflineSoloMode ? sim.Map.ObjectiveCells[0] : sim.OfflineBunCell;
+                _offlineBunOrb.transform.position = CellToWorld(bunCell.Row, bunCell.Col, 0.25f + 0.08f * Mathf.Sin(Time.time * 4f));
             }
             else if (_offlineBunOrb != null)
             {

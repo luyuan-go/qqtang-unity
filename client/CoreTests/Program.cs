@@ -31,6 +31,7 @@ namespace Qqtang.Core.Tests
                 TestAuthenticBattleItemsAndTransformations();
                 TestOfflineSoloAiAndBossMechanics();
                 TestPhase5NativeModesAndCodecs();
+                TestPhase6ArbitratorObjectivesAndBossAi();
                 TestStaticCatalogs();
                 TestRealMapFileIfPresent();
 
@@ -443,6 +444,72 @@ namespace Qqtang.Core.Tests
             sim4.Step(120, BattleDirection.None, false);
             Assert(sim4.LocalActor.State == ActorLifeState.Active, "TimedRespawn did not revive dead actor");
             Pass("Phase 5 Native Modes (Machine 0x10EF..0x115D, Box 0x115E..0x1168, Prop Cancel/Trigger, Rule 2 KickBomb, Rule 7 Durability, Rule 4 TimedRespawn, Directional Exit, Scheduled Supply)");
+        }
+
+        private static void TestPhase6ArbitratorObjectivesAndBossAi()
+        {
+            // 1. Online Rule 3 (Bun) -> RequestGetBun (0x0FB6) + RequestPutBun (0x0FB8) + Arbitrator NotifyGameOver (0x0FBB) at 3 points
+            var bunMap = MapDataLoader.BuildFallbackArena(301);
+            bunMap.NativeRule = 3;
+            bunMap.ObjectiveCells.Add(new GridCell(0, 2));
+            bunMap.Cells[0 * bunMap.Width + 2].Collision = CellCollision.Open;
+            var bunBegin = new GameBeginData { GameId = 603, MapId = 301, SpawnSeed = 5, ItemSeed = 6, ArbitratorPlayerId = 1 };
+            bunBegin.Players.Add(new PlayerGameInfoData { PlayerId = 1, RoleId = 1, TeamId = 1 });
+            bunBegin.Players.Add(new PlayerGameInfoData { PlayerId = 2, RoleId = 2, TeamId = 2 });
+            var bunSim = new Rule1BattleSimulation();
+            bunSim.Initialize(bunBegin, bunMap, 1, false);
+            bunSim.Step(3000, BattleDirection.None, false);
+            bunSim.LocalActor.SpawnCell = new GridCell(0, 0);
+            bunSim.LocalActor.PosX = 2 * 40 + 20; bunSim.LocalActor.PosY = 20; // walk onto bun at (0,2)
+            bunSim.Step(25, BattleDirection.None, false);
+            Assert(bunSim.BunCarrierPlayerId == 1 && bunSim.OutgoingTcpEvents.Any(e => e.schemaId == ModeEventSchemas.NotifyPlayerGetBun), "Arbitrator Rule 3 did not emit 0x0FB7 NotifyPlayerGetBun");
+            bunSim.TeamBunScores[1] = 2; // 3rd deposit should trigger Arbitrator NotifyGameOver (0x0FBB)
+            bunSim.LocalActor.PosX = 20; bunSim.LocalActor.PosY = 20; // return to home base (0,0)
+            bunSim.Step(25, BattleDirection.None, false);
+            Assert(bunSim.TeamBunScores[1] == 3, "Online Rule 3 deposit failed");
+            Assert(bunSim.OutgoingTcpEvents.Any(e => e.schemaId == ModeEventSchemas.NotifyPlayerPutBun), "Arbitrator Rule 3 did not emit 0x0FB9 NotifyPlayerPutBun");
+            Assert(bunSim.OutgoingTcpEvents.Any(e => e.schemaId == GameEventSchemas.NotifyGameOver), "Arbitrator did not emit 0x0FBB NotifyGameOver on Bun 3rd point");
+
+            // Non-arbitrator client sends 0x0FB6 RequestGetBun, Arbitrator validates & broadcasts 0x0FB7 NotifyPlayerGetBun
+            var peerBunSim = new Rule1BattleSimulation();
+            peerBunSim.Initialize(bunBegin, bunMap, 2, false);
+            peerBunSim.Step(3000, BattleDirection.None, false);
+            peerBunSim.LocalActor.PosX = 2 * 40 + 20; peerBunSim.LocalActor.PosY = 20;
+            peerBunSim.Step(25, BattleDirection.None, false);
+            var reqGet = peerBunSim.OutgoingTcpEvents.FirstOrDefault(e => e.schemaId == ModeEventSchemas.RequestGetBun);
+            Assert(reqGet.body != null, "Non-arbitrator Rule 3 did not emit 0x0FB6 RequestGetBun");
+            bunSim.OutgoingTcpEvents.Clear();
+            bunSim.ApplyRemoteMessage(2, ModeEventSchemas.RequestGetBun, reqGet.body);
+            Assert(bunSim.BunCarrierPlayerId == 2 && bunSim.OutgoingTcpEvents.Any(e => e.schemaId == ModeEventSchemas.NotifyPlayerGetBun), "Arbitrator did not relay 0x0FB6 -> 0x0FB7");
+
+            // 2. Online Rule 13 (Tank) -> flame on enemy base emits RequestTankBaseHp (0x15B3)
+            var tankMap = MapDataLoader.BuildFallbackArena(1301);
+            tankMap.NativeRule = 13;
+            tankMap.ObjectiveCells.Add(new GridCell(1, 1));
+            tankMap.ObjectiveCells.Add(new GridCell(1, 3));
+            var tankSim = new Rule1BattleSimulation();
+            tankSim.Initialize(bunBegin, tankMap, 1, false);
+            tankSim.Step(3000, BattleDirection.None, false);
+            tankSim.Flames.Add(new ActiveFlame { Cell = new GridCell(1, 3), OwnerId = 1, ExpireAtMs = 5000 });
+            tankSim.Step(25, BattleDirection.None, false);
+            Assert(tankSim.OutgoingTcpEvents.Any(e => e.schemaId == ModeEventSchemas.RequestTankBaseHp), "Online Rule 13 did not emit 0x15B3 RequestTankBaseHp");
+
+            // 3. Boss Patrol AI & Offline MachineDodge / BoxPush / KickBomb setup
+            var mSim = new Rule1BattleSimulation { IsOfflineSoloMode = true };
+            mSim.Initialize(bunBegin, MapDataLoader.BuildFallbackArena(201), 1, false);
+            mSim.ConfigureOfflineScenario(OfflinePracticeMode.MachineDodge);
+            Assert(mSim.NativeRule == 7 && mSim.Lifecycle == BattleLifecycleKind.NativeDurability && mSim.LocalActor.NativeHitPoints == 4, "Offline MachineDodge init failed");
+            mSim.Step(6200, BattleDirection.None, false);
+            Assert(mSim.Bombs.Count > 0, "Offline MachineDodge did not spawn machine wave bombs");
+
+            var bSim = new Rule1BattleSimulation { IsOfflineSoloMode = true };
+            bSim.Initialize(bunBegin, MapDataLoader.BuildFallbackArena(201), 1, false);
+            bSim.ConfigureOfflineScenario(OfflinePracticeMode.BossRaid);
+            int bossStartX = bSim.Bosses[0].PosX, bossStartY = bSim.Bosses[0].PosY;
+            bSim.Step(3000, BattleDirection.None, false);
+            for (int i = 0; i < 10; i++) bSim.Step(50, BattleDirection.None, false);
+            Assert(bSim.Bosses[0].PosX != bossStartX || bSim.Bosses[0].PosY != bossStartY, "Boss Patrol AI did not move toward player");
+            Pass("Phase 6 Arbitrator GameOver + Online Bun(0x0FB6/0x0FB8) + TankBase(0x15B3) + Boss Patrol AI + Offline MachineDodge");
         }
 
         private static void TestStaticCatalogs()
@@ -878,7 +945,7 @@ namespace Qqtang.Core.Tests
                 Assert(div.Result == 0, $"Divorce failed: {div.Result}");
                 Pass("Live Marriage (Info, Spark, Answer, LoveWord, Divorce)");
 
-                // 14. Live Solo Adventure Mode Start (SinglePlayerAdventureCard 99 -> GameBegin + CreatePVENPCBoss 0x138A) & Clean Logout
+                // 14. Live Solo Adventure Multi-Stage Clear (1601 -> CreatePVENPCBoss 0x138A -> Kill all NPCs via ReportDeathId -> NextMap 0x1178 -> Stage 2 1602!) & Clean Logout
                 await c1.SetItemStatusAsync(SpecialItemIds.SinglePlayerAdventureCard, 1);
                 ushort advRoomId = await c1.CreateRoomAsync("AdvSoloRoom", RoomPropertyFlag.Standard, RoomGameType.Adventure);
                 var advEnter = await c1.EnterRoomAsync(advRoomId, roleId: 1);
@@ -887,10 +954,29 @@ namespace Qqtang.Core.Tests
                 Assert(advStart == 0, $"Solo Adventure StartGame failed: 0x{advStart:X4}");
                 var advBegin = await WaitForCommandAsync(c1, GameCommands.GameBeginNotify, p => GameBeginData.ParseLengthPrefixed(p.Payload));
                 Assert(advBegin.GameId > 0 && advBegin.Players.Count == 1, "Adventure GameBegin mismatch");
+
+                // Receive CreatePveNpcBoss (0x138A), feed into Rule1BattleSimulation, clear stage 1 via exact ReportDeathId, advance to stage 2!
+                byte[] pveBossBody = await WaitForGameEventSchemaAsync(c1, ModeEventSchemas.CreatePveNpcBoss);
+                var advSim = new Rule1BattleSimulation();
+                advSim.Initialize(advBegin, MapDataLoader.BuildFallbackArena(advBegin.MapId), c1.PlayerId, false);
+                advSim.ApplyRemoteMessage(0, ModeEventSchemas.CreatePveNpcBoss, pveBossBody);
+                Assert(advSim.Bosses.Count > 0, "CreatePveNpcBoss did not populate stage NPCs");
+                uint t = 4000;
+                foreach (var boss in advSim.Bosses)
+                {
+                    var die = new PlayerDeathMessage { PlayerId = boss.ReportDeathId, ClientTime = t += 100, PosX = (ushort)boss.PosX, PosY = (ushort)boss.PosY };
+                    await c1.SendGameEventTcpAsync(advRoomId, GameEventSchemas.NotifyPlayerDie, die.Marshal());
+                }
+                await Task.Delay(120);
+                await c1.SendAdventureNextMapAsync(advRoomId, unchecked((uint)advBegin.ContinueId), 0, t + 500);
+                byte[] nextMapBody = await WaitForGameEventSchemaAsync(c1, ModeEventSchemas.NotifyGameNextMap);
+                var stage2Begin = GameBeginData.Parse(nextMapBody);
+                Assert(stage2Begin.MapId != advBegin.MapId && stage2Begin.GameId != advBegin.GameId,
+                    $"Adventure NextMap did not advance stage: stage1={advBegin.MapId} stage2={stage2Begin.MapId}");
                 await c1.LeaveRoomAsync(advRoomId);
                 await c1.LogoutAsync();
                 await c2.LogoutAsync();
-                Pass($"Live Solo Adventure Start (Room={advRoomId}, GameID={advBegin.GameId}, Map={advBegin.MapId}) & Clean Logout");
+                Pass($"Live Solo Adventure Multi-Stage Clear (Stage1={advBegin.MapId} NPCs={advSim.Bosses.Count} -> Stage2={stage2Begin.MapId} GameID={stage2Begin.GameId}) & Clean Logout");
             }
             finally
             {
@@ -910,6 +996,23 @@ namespace Qqtang.Core.Tests
                 await Task.Delay(50);
             }
             throw new TimeoutException($"Timed out waiting for command 0x{command:X4}.");
+        }
+
+        private static async Task<byte[]> WaitForGameEventSchemaAsync(QqtangSessionClient client, ushort schema)
+        {
+            for (int i = 0; i < 60; i++)
+            {
+                while (client.TryDequeueTcpPacket(out var pkt))
+                {
+                    if (pkt.Command == GameCommands.GameEventNotify)
+                    {
+                        var ev = NotifyGameEventMessage.Parse(pkt.Payload);
+                        if (ev.Schema == schema) return ev.Body;
+                    }
+                }
+                await Task.Delay(50);
+            }
+            throw new TimeoutException($"Timed out waiting for GameEvent schema 0x{schema:X4}.");
         }
 
         private static async Task<GameOverData> WaitForGameOverAsync(QqtangSessionClient client)

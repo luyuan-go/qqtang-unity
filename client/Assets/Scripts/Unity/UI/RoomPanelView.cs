@@ -17,6 +17,7 @@ namespace Qqtang.UnityClient.UI
 
         private readonly Text _roomTitleText;
         private readonly Text _mapLabelText;
+        private readonly Image _mapThumbPreview;
         private readonly Button _selectMapBtn;
         private readonly Button _settingsBtn;
         private readonly Button _modeCycleBtn;
@@ -59,7 +60,13 @@ namespace Qqtang.UnityClient.UI
             UiFactory.SetLayout(_roomTitleText.gameObject, flexW: 1f, prefH: 36f);
 
             _mapLabelText = UiFactory.CreateText(header, "地图: 包子01 (201)", 14, UiFactory.TextLight, TextAnchor.MiddleRight);
-            UiFactory.SetLayout(_mapLabelText.gameObject, prefW: 190f, prefH: 36f);
+            UiFactory.SetLayout(_mapLabelText.gameObject, prefW: 170f, prefH: 36f);
+            var mtGo = new GameObject("MapThumb", typeof(RectTransform), typeof(Image));
+            mtGo.transform.SetParent(header, false);
+            _mapThumbPreview = mtGo.GetComponent<Image>();
+            _mapThumbPreview.preserveAspect = true;
+            UiFactory.SetLayout(mtGo, prefW: 48f, prefH: 38f);
+            mtGo.SetActive(false);
 
             _selectMapBtn = UiFactory.CreateButton(header, "选地图", OpenMapModal, UiFactory.AccentCeladon, fontSize: 13, width: 76f, height: 34f);
             _modeCycleBtn = UiFactory.CreateButton(header, "切模式", CycleRoomMode, UiFactory.AccentMuted, fontSize: 13, width: 76f, height: 34f);
@@ -224,6 +231,12 @@ namespace Qqtang.UnityClient.UI
             string modeName = LobbyAndNavView.ModeLabel(s.GameType);
             _roomTitleText.text = $"房间 #{s.RoomId} · {s.RoomName}  [{modeName}]" + (isOwner ? " (房主)" : "");
             _mapLabelText.text = $"地图: {_ctx.Catalogs.GetMapName(s.MapId)} ({s.MapId})";
+            if (_mapThumbPreview != null)
+            {
+                Sprite thumb = _ctx.Art.GetMapThumbSprite(s.MapId);
+                _mapThumbPreview.sprite = thumb;
+                _mapThumbPreview.gameObject.SetActive(thumb != null);
+            }
             _selectMapBtn.interactable = isOwner;
             _settingsBtn.interactable = isOwner;
             _modeCycleBtn.interactable = isOwner;
@@ -286,7 +299,7 @@ namespace Qqtang.UnityClient.UI
                     var pImg = pGo.GetComponent<Image>();
                     pImg.preserveAspect = true;
                     byte rId = member.GameInfo != null ? member.GameInfo.RoleId : (byte)1;
-                    pImg.sprite = _ctx.Art.GetCharacterSprite(rId, "S", UiFactory.TeamBadgeColor(member.TeamId));
+                    pImg.sprite = _ctx.Art.GetRolePortraitSprite(rId, UiFactory.TeamBadgeColor(member.TeamId));
                     UiFactory.SetLayout(pGo, prefW: 48f, prefH: 48f);
 
                     var nameCol = UiFactory.CreateEmpty(mid, "Names");
@@ -385,11 +398,21 @@ namespace Qqtang.UnityClient.UI
 
                 ushort id = m.MapId;
                 var row = UiFactory.CreatePanel(_mapListContent, $"Map_{id}", UiFactory.BgSlateLight);
-                UiFactory.SetLayout(row.gameObject, prefH: 34f);
+                UiFactory.SetLayout(row.gameObject, prefH: 42f);
                 UiFactory.AddHLayout(row.gameObject, 8f, 10, 4);
+                Sprite thumb = _ctx.Art.GetMapThumbSprite(id);
+                if (thumb != null)
+                {
+                    var tGo = new GameObject("Thumb", typeof(RectTransform), typeof(Image));
+                    tGo.transform.SetParent(row, false);
+                    var tImg = tGo.GetComponent<Image>();
+                    tImg.sprite = thumb;
+                    tImg.preserveAspect = true;
+                    UiFactory.SetLayout(tGo, prefW: 44f, prefH: 34f);
+                }
                 string famTag = !string.IsNullOrEmpty(m.Family) ? $" [{m.Family}]" : string.Empty;
                 var lbl = UiFactory.CreateText(row, $"#{id}  {m.Name}{famTag}", 13, id == _ctx.Store.MapId ? UiFactory.AccentGold : UiFactory.TextLight);
-                UiFactory.SetLayout(lbl.gameObject, flexW: 1f, prefH: 26f);
+                UiFactory.SetLayout(lbl.gameObject, flexW: 1f, prefH: 30f);
                 UiFactory.CreateButton(row, "选用", () =>
                 {
                     _mapModal.gameObject.SetActive(false);

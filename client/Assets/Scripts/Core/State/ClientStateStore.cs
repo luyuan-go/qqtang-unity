@@ -742,7 +742,7 @@ namespace Qqtang.Core.State
                         }
                         else if (ev.Schema == ModeEventSchemas.NotifyGameNextMap)
                         {
-                            var nextStage = GameBeginData.ParseLengthPrefixed(ev.Body);
+                            var nextStage = GameBeginData.Parse(ev.Body);
                             CurrentGameBegin = nextStage;
                             NotifyChanged();
                             OnNextMapStageReceived?.Invoke(nextStage);

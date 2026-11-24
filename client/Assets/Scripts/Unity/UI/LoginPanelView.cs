@@ -21,6 +21,9 @@ namespace Qqtang.UnityClient.UI
         private byte _selectedRoleId = 1;
         private ushort _selectedOfflineMapId = 201;
         private readonly Text _offlineMapLabel;
+        private readonly RectTransform _offlineMapModal;
+        private readonly InputField _offlineMapSearch;
+        private readonly RectTransform _offlineMapListContent;
 
         public LoginPanelView(Transform parent, UiContext ctx)
         {
@@ -33,8 +36,8 @@ namespace Qqtang.UnityClient.UI
             card.anchorMin = new Vector2(0.5f, 0.5f);
             card.anchorMax = new Vector2(0.5f, 0.5f);
             card.pivot = new Vector2(0.5f, 0.5f);
-            card.sizeDelta = new Vector2(720f, 660f);
-            UiFactory.AddVLayout(card.gameObject, 9f, 26, 16);
+            card.sizeDelta = new Vector2(740f, 690f);
+            UiFactory.AddVLayout(card.gameObject, 8f, 24, 14);
 
             // Header banner (Daoist logo sprite if cached, plus subtitle)
             var logoSprite = _ctx.Art.GetLogoSprite();
@@ -107,12 +110,12 @@ namespace Qqtang.UnityClient.UI
                 var btn = rCard.gameObject.AddComponent<Button>();
                 btn.onClick.AddListener(() => SelectRole(roleId));
 
-                // Portrait preview from ArtAssetResolver
+                // Portrait preview from ArtAssetResolver (dedicated 256px Daoist portrait)
                 var imgGo = new GameObject("Portrait", typeof(RectTransform), typeof(Image));
                 imgGo.transform.SetParent(rCard, false);
                 var pImg = imgGo.GetComponent<Image>();
                 pImg.preserveAspect = true;
-                pImg.sprite = _ctx.Art.GetCharacterSprite(roleId, "S", UiFactory.TeamBadgeColor((byte)(i + 1)));
+                pImg.sprite = _ctx.Art.GetRolePortraitSprite(roleId, UiFactory.TeamBadgeColor((byte)(i + 1)));
                 UiFactory.SetLayout(imgGo, prefH: 64f);
 
                 var nameTxt = UiFactory.CreateText(rCard, info.DaoistName, 15, UiFactory.TextLight, TextAnchor.MiddleCenter, FontStyle.Bold);
@@ -134,23 +137,99 @@ namespace Qqtang.UnityClient.UI
             UiFactory.SetLayout(offlineMapRow.gameObject, prefH: 28f);
             _offlineMapLabel = UiFactory.CreateText(offlineMapRow, "离线地图: 包子01(201)", 12, UiFactory.AccentGold, FontStyle.Bold);
             UiFactory.SetLayout(_offlineMapLabel.gameObject, flexW: 1f, prefH: 26f);
-            UiFactory.CreateButton(offlineMapRow, "包子01", () => SelectOfflineMap(201, "包子01"), UiFactory.AccentMuted, fontSize: 11, width: 64f, height: 24f);
-            UiFactory.CreateButton(offlineMapRow, "水面01", () => SelectOfflineMap(1, "水面01"), UiFactory.AccentMuted, fontSize: 11, width: 64f, height: 24f);
-            UiFactory.CreateButton(offlineMapRow, "英雄01", () => SelectOfflineMap(101, "英雄01"), UiFactory.AccentMuted, fontSize: 11, width: 64f, height: 24f);
-            UiFactory.CreateButton(offlineMapRow, "抢包山", () => SelectOfflineMap(301, "抢包山01"), UiFactory.AccentMuted, fontSize: 11, width: 64f, height: 24f);
+            UiFactory.CreateButton(offlineMapRow, "包子01", () => SelectOfflineMap(201, "包子01"), UiFactory.AccentMuted, fontSize: 11, width: 58f, height: 24f);
+            UiFactory.CreateButton(offlineMapRow, "水面01", () => SelectOfflineMap(1, "水面01"), UiFactory.AccentMuted, fontSize: 11, width: 58f, height: 24f);
+            UiFactory.CreateButton(offlineMapRow, "英雄01", () => SelectOfflineMap(101, "英雄01"), UiFactory.AccentMuted, fontSize: 11, width: 58f, height: 24f);
+            UiFactory.CreateButton(offlineMapRow, "抢包山", () => SelectOfflineMap(301, "抢包山01"), UiFactory.AccentMuted, fontSize: 11, width: 58f, height: 24f);
+            UiFactory.CreateButton(offlineMapRow, "全部地图...", OpenOfflineMapModal, UiFactory.AccentGold, UiFactory.TextInk, fontSize: 11, width: 78f, height: 24f);
 
             var actionRow = UiFactory.CreateEmpty(card, "OfflineActions");
-            UiFactory.AddHLayout(actionRow.gameObject, 8f, 0, 0);
-            UiFactory.SetLayout(actionRow.gameObject, prefH: 38f);
-            UiFactory.CreateButton(actionRow, "离线 1v1 竞技", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 1, OfflinePracticeMode.Classic, _selectedOfflineMapId), UiFactory.AccentCeladon, fontSize: 13, width: 126f, height: 36f);
-            UiFactory.CreateButton(actionRow, "离线 1v3 混战", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 3, OfflinePracticeMode.Classic, _selectedOfflineMapId), UiFactory.AccentGold, UiFactory.TextInk, fontSize: 13, width: 126f, height: 36f);
-            UiFactory.CreateButton(actionRow, "单人 BOSS 挑战", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 0, OfflinePracticeMode.BossRaid, _selectedOfflineMapId), UiFactory.AccentVermilion, fontSize: 13, width: 132f, height: 36f);
-            UiFactory.CreateButton(actionRow, "抢包山", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 1, OfflinePracticeMode.BunCapture, _selectedOfflineMapId), UiFactory.AccentCeladon, fontSize: 13, width: 92f, height: 36f);
-            UiFactory.CreateButton(actionRow, "雕塑攻防", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 1, OfflinePracticeMode.SculptureDefense, _selectedOfflineMapId), UiFactory.AccentMuted, fontSize: 13, width: 96f, height: 36f);
+            UiFactory.AddHLayout(actionRow.gameObject, 6f, 0, 0);
+            UiFactory.SetLayout(actionRow.gameObject, prefH: 34f);
+            UiFactory.CreateButton(actionRow, "离线 1v1", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 1, OfflinePracticeMode.Classic, _selectedOfflineMapId), UiFactory.AccentCeladon, fontSize: 12, width: 86f, height: 32f);
+            UiFactory.CreateButton(actionRow, "离线 1v3", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 3, OfflinePracticeMode.Classic, _selectedOfflineMapId), UiFactory.AccentGold, UiFactory.TextInk, fontSize: 12, width: 86f, height: 32f);
+            UiFactory.CreateButton(actionRow, "单人BOSS", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 0, OfflinePracticeMode.BossRaid, _selectedOfflineMapId), UiFactory.AccentVermilion, fontSize: 12, width: 88f, height: 32f);
+            UiFactory.CreateButton(actionRow, "抢包山", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 1, OfflinePracticeMode.BunCapture, _selectedOfflineMapId), UiFactory.AccentCeladon, fontSize: 12, width: 72f, height: 32f);
+            UiFactory.CreateButton(actionRow, "雕塑攻防", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 1, OfflinePracticeMode.SculptureDefense, _selectedOfflineMapId), UiFactory.AccentMuted, fontSize: 12, width: 80f, height: 32f);
+            UiFactory.CreateButton(actionRow, "踢泡大战", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 1, OfflinePracticeMode.KickBomb, _selectedOfflineMapId), UiFactory.AccentCeladon, fontSize: 12, width: 80f, height: 32f);
+            UiFactory.CreateButton(actionRow, "机械世界", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 1, OfflinePracticeMode.MachineDodge, _selectedOfflineMapId), UiFactory.AccentVermilion, fontSize: 12, width: 80f, height: 32f);
+            UiFactory.CreateButton(actionRow, "推箱大战", () => _ctx.App.StartOfflineSoloMatch(_selectedRoleId, 1, OfflinePracticeMode.BoxPush, _selectedOfflineMapId), UiFactory.AccentMuted, fontSize: 12, width: 80f, height: 32f);
 
             // Status bar
             _statusText = UiFactory.CreateText(card, "请先启动本地 Go 服务端 (tools/start-local-server.ps1)，再点击登录。", 13, UiFactory.TextSubtle, TextAnchor.MiddleCenter);
-            UiFactory.SetLayout(_statusText.gameObject, prefH: 34f);
+            UiFactory.SetLayout(_statusText.gameObject, prefH: 30f);
+
+            // Offline Full Map Picker Modal (all 330+ maps with decoded thumbnails)
+            _offlineMapModal = UiFactory.CreatePanel(Root, "OfflineMapModal", UiFactory.BgModalBackdrop);
+            UiFactory.Stretch(_offlineMapModal);
+            var mCard = UiFactory.CreatePanel(_offlineMapModal, "Card", UiFactory.BgSlateCard, UiFactory.AccentGold);
+            mCard.anchorMin = mCard.anchorMax = mCard.pivot = new Vector2(0.5f, 0.5f);
+            mCard.sizeDelta = new Vector2(540f, 520f);
+            UiFactory.AddVLayout(mCard.gameObject, 8f, 16, 14);
+            var mTop = UiFactory.CreateEmpty(mCard, "Top");
+            UiFactory.AddHLayout(mTop.gameObject, 8f, 0, 0);
+            UiFactory.SetLayout(mTop.gameObject, prefH: 34f);
+            var mTitle = UiFactory.CreateText(mTop, "选择离线演武地图（全 330+ 原版地图）", 16, UiFactory.AccentGold, FontStyle.Bold);
+            UiFactory.SetLayout(mTitle.gameObject, flexW: 1f, prefH: 32f);
+            UiFactory.CreateButton(mTop, "关闭", () => _offlineMapModal.gameObject.SetActive(false), UiFactory.AccentMuted, width: 68f, height: 30f);
+            _offlineMapSearch = UiFactory.CreateInputField(mCard, "按名称/分类/ID搜索（如：包子、水、机械、箱、201）...", "");
+            _offlineMapSearch.onValueChanged.AddListener(_ => PopulateOfflineMaps());
+            var mScroll = UiFactory.CreateScrollView(mCard, "Maps", out _offlineMapListContent, spacing: 4f);
+            UiFactory.SetLayout(mScroll.gameObject, flexW: 1f, flexH: 1f);
+            _offlineMapModal.gameObject.SetActive(false);
+        }
+
+        public void ApplySavedDefaults(string host, int port, uint uin, byte roleId)
+        {
+            if (!string.IsNullOrEmpty(host)) _hostInput.text = host;
+            if (port > 0) _portInput.text = port.ToString();
+            if (uin > 0) _uinInput.text = uin.ToString();
+            if (roleId >= 1 && roleId <= 4) SelectRole(roleId);
+        }
+
+        private void OpenOfflineMapModal()
+        {
+            _offlineMapModal.gameObject.SetActive(true);
+            PopulateOfflineMaps();
+        }
+
+        private void PopulateOfflineMaps()
+        {
+            UiFactory.ClearChildren(_offlineMapListContent);
+            string q = (_offlineMapSearch.text ?? string.Empty).Trim();
+            int shown = 0;
+            foreach (var m in _ctx.Catalogs.Maps)
+            {
+                if (!string.IsNullOrEmpty(q) &&
+                    m.Name.IndexOf(q, StringComparison.OrdinalIgnoreCase) < 0 &&
+                    (string.IsNullOrEmpty(m.Family) || m.Family.IndexOf(q, StringComparison.OrdinalIgnoreCase) < 0) &&
+                    !m.MapId.ToString().Contains(q))
+                    continue;
+                ushort id = m.MapId;
+                string mName = m.Name;
+                var row = UiFactory.CreatePanel(_offlineMapListContent, $"OMap_{id}", UiFactory.BgSlateLight);
+                UiFactory.SetLayout(row.gameObject, prefH: 40f);
+                UiFactory.AddHLayout(row.gameObject, 8f, 10, 4);
+                Sprite thumb = _ctx.Art.GetMapThumbSprite(id);
+                if (thumb != null)
+                {
+                    var tGo = new GameObject("Thumb", typeof(RectTransform), typeof(Image));
+                    tGo.transform.SetParent(row, false);
+                    var tImg = tGo.GetComponent<Image>();
+                    tImg.sprite = thumb;
+                    tImg.preserveAspect = true;
+                    UiFactory.SetLayout(tGo, prefW: 42f, prefH: 32f);
+                }
+                string fam = !string.IsNullOrEmpty(m.Family) ? $" [{m.Family}]" : string.Empty;
+                var lbl = UiFactory.CreateText(row, $"#{id} {mName}{fam}", 13, id == _selectedOfflineMapId ? UiFactory.AccentGold : UiFactory.TextLight);
+                UiFactory.SetLayout(lbl.gameObject, flexW: 1f, prefH: 28f);
+                UiFactory.CreateButton(row, "选用", () =>
+                {
+                    SelectOfflineMap(id, mName);
+                    _offlineMapModal.gameObject.SetActive(false);
+                }, UiFactory.AccentCeladon, fontSize: 12, width: 60f, height: 26f);
+                if (++shown >= 90) break;
+            }
         }
 
         private void SelectOfflineMap(ushort mapId, string name)

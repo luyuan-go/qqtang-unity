@@ -48,16 +48,65 @@ CORE_DAOIST_ASSETS: Dict[str, str] = {
     "characters/role_3_N": "assets/characters/idle/v1/lotus-healer-N.png",
     "characters/role_3_E": "assets/characters/idle/v1/lotus-healer-E.png",
     "characters/role_3_W": "assets/characters/idle/v1/lotus-healer-W.png",
+    # Trapped-in-bubble Daoist sprites for core 4 roles
+    "characters/trapped_0": "assets/characters/trapped/v2/daoist-child.png",
+    "characters/trapped_1": "assets/characters/trapped/v2/moon-shadow.png",
+    "characters/trapped_2": "assets/characters/trapped/v2/mountain-guardian.png",
+    "characters/trapped_3": "assets/characters/trapped/v2/lotus-healer.png",
+    # Dedicated Daoist 256px portraits for all 16 playable roles
+    "portraits/role_1": "assets/characters/portraits-candidates/daoist-child-256.png",
+    "portraits/role_2": "assets/characters/portraits-candidates/moon-shadow-256.png",
+    "portraits/role_3": "assets/characters/portraits-candidates/mountain-guardian-256.png",
+    "portraits/role_4": "assets/characters/portraits-candidates/lotus-healer-256.png",
+    "portraits/role_5": "assets/characters/portraits-candidates/02_fire_talisman_boy-256.png",
+    "portraits/role_6": "assets/characters/portraits-candidates/08_alchemy_prodigy_boy-256.png",
+    "portraits/role_7": "assets/characters/portraits-candidates/01_ice_sword_girl-256.png",
+    "portraits/role_8": "assets/characters/portraits-candidates/05_celestial_musician_girl-256.png",
+    "portraits/role_9": "assets/characters/portraits-candidates/09_bamboo_archer_girl-256.png",
+    "portraits/role_13": "assets/characters/portraits-candidates/20_star_formation_master_girl-256.png",
+    "portraits/role_14": "assets/characters/portraits-candidates/06_thunder_caster_boy-256.png",
+    "portraits/role_18": "assets/characters/portraits-candidates/14_short_hair_snow_summoner_girl-256.png",
+    "portraits/role_19": "assets/characters/portraits-candidates/paper-kite-wanderer-256.png",
+    "portraits/role_20": "assets/characters/portraits-candidates/10_crimson_spear_girl-256.png",
+    "portraits/role_21": "assets/characters/portraits-candidates/15_water_dragon_scholar_boy-256.png",
+    "portraits/role_22": "assets/characters/portraits-candidates/jade-craft-artisan-256.png",
+    # All 8 native transformation Daoist avatars (AvatarRoleId 41..46, 54, 55)
+    "transforms/avatar_41": "assets/characters/motion-generated/transformations/avatar-41-qingyu-cloud-duck/master.png",
+    "transforms/avatar_42": "assets/characters/motion-generated/transformations/avatar-42-ink-horn-fox/master.png",
+    "transforms/avatar_43": "assets/characters/motion-generated/transformations/avatar-43-ruyi-lingzhi-spirit/master.png",
+    "transforms/avatar_44": "assets/characters/motion-generated/transformations/avatar-44-jade-palm-bamboo-bear/master.png",
+    "transforms/avatar_45": "assets/characters/motion-generated/transformations/avatar-45-cloud-lantern-spirit/master.png",
+    "transforms/avatar_46": "assets/characters/motion-generated/transformations/avatar-46-golden-gourd-sage/master.png",
+    "transforms/avatar_54": "assets/characters/motion-generated/transformations/avatar-54-jade-shell-crab/master.png",
+    "transforms/avatar_55": "assets/characters/motion-generated/transformations/avatar-55-jade-stone-axe-child/master.png",
+    # Multi-frame Daoist bubble & flame animations + protection shield
+    "effects/bubble": "assets/effects/bubbles/bomb-1/00.png",
+    "effects/bubble_f0": "assets/effects/bubbles/bomb-1/00.png",
+    "effects/bubble_f1": "assets/effects/bubbles/bomb-1/01.png",
+    "effects/bubble_f2": "assets/effects/bubbles/bomb-1/03.png",
+    "effects/bubble_alt_f0": "assets/effects/bubbles/bomb-4/00.png",
+    "effects/bubble_alt_f1": "assets/effects/bubbles/bomb-4/01.png",
+    "effects/bubble_alt_f2": "assets/effects/bubbles/bomb-4/02.png",
+    "effects/bubble_alt_f3": "assets/effects/bubbles/bomb-4/03.png",
     "effects/flame": "assets/effects/flames/flame10/00.png",
-    "effects/bubble": "assets/effects/bubbles/00.png",
+    "effects/flame_f0": "assets/effects/flames/flame10/00.png",
+    "effects/flame_f1": "assets/effects/flames/flame10/01.png",
+    "effects/flame_f2": "assets/effects/flames/flame10/02.png",
+    "effects/flame_f3": "assets/effects/flames/flame10/03.png",
     "effects/shield": "assets/effects/protection-bubble-v1.png",
+    "effects/bun": "assets/runtime/battle-props-20261112/bun.png",
     "pickups/scene_1": "assets/runtime/battle-props-20261112/capacity.png",
     "pickups/scene_2": "assets/runtime/battle-props-20261112/range.png",
     "pickups/scene_3": "assets/runtime/battle-props-20261112/speed.png",
     "pickups/scene_6": "assets/runtime/battle-props-20261112/capacity.png",
     "pickups/scene_7": "assets/runtime/battle-props-20261112/range.png",
     "pickups/scene_8": "assets/runtime/battle-props-20261112/speed.png",
+    "pickups/scene_24": "assets/runtime/battle-props-20261112/needle.png",
+    "pickups/scene_63": "assets/runtime/battle-props-20261112/needle.png",
     "ui/logo": "assets/branding/linghu-wordmark-login-1024.png",
+    "ui/victory": "assets/ui/results/victory.png",
+    "ui/defeat": "assets/ui/results/defeat.png",
+    "ui/draw": "assets/ui/results/draw.png",
 }
 
 DAOIST_AUDIO_CLIPS: List[str] = [
@@ -419,6 +468,23 @@ def main() -> int:
                     if m:
                         enqueue_fb(fmt.format(int(m.group(1))), pkg_slice=(offset, comp_size))
                         break
+
+        # Also decode original map/*.img thumbnails mapped by mapId from mapDesc.py
+        map_desc_py = args.original_client / "map" / "mapDesc.py"
+        if map_desc_py.is_file():
+            try:
+                raw_desc = map_desc_py.read_bytes().decode("gb18030", errors="ignore")
+                thumb_pat = re.compile(
+                    r"^\(\s*([0-9]+)\s*,\s*'[^']+'\s*,\s*'[^']*'\s*,\s*[0-9]+\s*,\s*[0-9]+\s*,\s*[0-9]+\s*,\s*'[^']+\.map'\s*,\s*'([^']+\.img)'",
+                    re.MULTILINE,
+                )
+                for m in thumb_pat.finditer(raw_desc):
+                    mid = int(m.group(1))
+                    img_file = args.original_client / "map" / m.group(2)
+                    if mid > 0 and img_file.is_file():
+                        enqueue_fb(f"maps/thumb_{mid}", file_path=img_file)
+            except Exception:
+                pass
 
         # Also scan loose object/pet/*.img and object/bomb/*.img for extra skins/pets not inside object.pkg
         loose_dirs = [
